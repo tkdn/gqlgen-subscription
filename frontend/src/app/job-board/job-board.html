@@ -1,0 +1,31 @@
+<section class="job-board">
+  <form class="create-form" (submit)="$event.preventDefault(); createJob()">
+    <input
+      type="text"
+      name="jobName"
+      placeholder="job name"
+      [(ngModel)]="newJobName"
+    />
+    <button type="submit">Create Job</button>
+  </form>
+
+  <ul class="job-list">
+    @for (job of (jobs$ | async) ?? []; track job.name) {
+      <li class="job-item">
+        <span class="job-name">{{ job.name }}</span>
+        <span class="job-status">{{ job.status }}</span>
+        <span class="job-actions">
+          @for (state of jobStates; track state) {
+            <button
+              type="button"
+              [disabled]="job.status === state"
+              (click)="updateJobStatus(job.name, state)"
+            >
+              {{ state }}
+            </button>
+          }
+        </span>
+      </li>
+    }
+  </ul>
+</section>
