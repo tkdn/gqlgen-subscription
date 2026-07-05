@@ -12,7 +12,9 @@ import (
 	"github.com/tkdn/gqlgen-subscription/backend/jobstore"
 )
 
-// testDB は本番用(DB0)と衝突しないよう、テスト専用のRedis DB番号を使う。
+// testDB は本番用(DB0)や他パッケージのテスト(pubsubはDB14)と衝突しないよう、
+// このパッケージ専用のRedis DB番号を使う。go test ./... はパッケージ単位で
+// 並列実行されるため、DB番号を共有するとFlushDBが競合する。
 const testDB = 15
 
 // newTestClient は起動しているRedisのテスト専用DBに接続し、
@@ -56,7 +58,7 @@ func newTestStore(t *testing.T) (*jobstore.Store, *redis.Client) {
 func TestCreateAndList(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := t.Context()
-	const userID = "user-a"
+	const userID = "jobstore-test-user-a"
 
 	created, err := store.Create(ctx, userID, "job-1")
 	if err != nil {
@@ -78,7 +80,7 @@ func TestCreateAndList(t *testing.T) {
 func TestUpdateStatus(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := t.Context()
-	const userID = "user-a"
+	const userID = "jobstore-test-user-a"
 
 	if _, err := store.Create(ctx, userID, "job-1"); err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -105,14 +107,14 @@ func TestListIsolatedByUser(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := t.Context()
 
-	if _, err := store.Create(ctx, "user-a", "job-a"); err != nil {
+	if _, err := store.Create(ctx, "jobstore-test-user-a", "job-a"); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if _, err := store.Create(ctx, "user-b", "job-b"); err != nil {
+	if _, err := store.Create(ctx, "jobstore-test-user-b", "job-b"); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	jobsA, err := store.List(ctx, "user-a")
+	jobsA, err := store.List(ctx, "jobstore-test-user-a")
 	if err != nil {
 		t.Fatalf("List(user-a) error = %v", err)
 	}
@@ -120,7 +122,7 @@ func TestListIsolatedByUser(t *testing.T) {
 		t.Fatalf("List(user-a) = %+v, want only job-a", jobsA)
 	}
 
-	jobsB, err := store.List(ctx, "user-b")
+	jobsB, err := store.List(ctx, "jobstore-test-user-b")
 	if err != nil {
 		t.Fatalf("List(user-b) error = %v", err)
 	}
@@ -132,14 +134,14 @@ func TestListIsolatedByUser(t *testing.T) {
 func TestListGarbageCollectsExpiredIndex(t *testing.T) {
 	store, rdb := newTestStore(t)
 	ctx := t.Context()
-	const userID = "user-a"
+	const userID = "jobstore-test-user-a"
 
 	if _, err := store.Create(ctx, userID, "job-1"); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 
 	// TTL失効を模擬するため、ジョブ実体（Hash）だけを直接削除する。
-	if err := rdb.Del(ctx, "job:user-a:job-1").Err(); err != nil {
+	if err := rdb.Del(ctx, "job:jobstore-test-user-a:job-1").Err(); err != nil {
 		t.Fatalf("Del() error = %v", err)
 	}
 
@@ -151,7 +153,7 @@ func TestListGarbageCollectsExpiredIndex(t *testing.T) {
 		t.Fatalf("List() = %+v, want empty after expiry", jobs)
 	}
 
-	members, err := rdb.SMembers(ctx, "user:user-a:jobs").Result()
+	members, err := rdb.SMembers(ctx, "user:jobstore-test-user-a:jobs").Result()
 	if err != nil {
 		t.Fatalf("SMembers() error = %v", err)
 	}
@@ -163,13 +165,13 @@ func TestListGarbageCollectsExpiredIndex(t *testing.T) {
 func TestSaveSetsTTL(t *testing.T) {
 	store, rdb := newTestStore(t)
 	ctx := t.Context()
-	const userID = "user-a"
+	const userID = "jobstore-test-user-a"
 
 	if _, err := store.Create(ctx, userID, "job-1"); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	ttl, err := rdb.TTL(ctx, "job:user-a:job-1").Result()
+	ttl, err := rdb.TTL(ctx, "job:jobstore-test-user-a:job-1").Result()
 	if err != nil {
 		t.Fatalf("TTL() error = %v", err)
 	}
@@ -181,7 +183,7 @@ func TestSaveSetsTTL(t *testing.T) {
 func TestSavePublishesUpdate(t *testing.T) {
 	store, rdb := newTestStore(t)
 	ctx := t.Context()
-	const userID = "user-a"
+	const userID = "jobstore-test-user-a"
 
 	// (1) このテスト専用のSubscriberを、store.Createが使うのと同じRedis接続先・
 	//     同じチャンネル名（job:updates:<userID>）に対して張る。
