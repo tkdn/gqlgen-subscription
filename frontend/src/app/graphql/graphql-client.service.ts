@@ -1,5 +1,5 @@
 import { HttpClient } from '@angular/common/http';
-import { Injectable, inject } from '@angular/core';
+import { Service, inject } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
 
 import { Job, JobState } from '../models/job.model';
@@ -36,7 +36,7 @@ const UPDATE_JOB_STATUS_MUTATION = `
   }
 `;
 
-@Injectable({ providedIn: 'root' })
+@Service()
 export class GraphqlClientService {
   private readonly http = inject(HttpClient);
 
