@@ -1,0 +1,25 @@
+enum JobState {
+  PENDING
+  ANALYZING
+  GENERATING
+  COMPLETED
+  FAILED
+}
+
+type Job {
+  name: String!
+  status: JobState!
+}
+
+type Query {
+  jobs: [Job!]!
+}
+
+type Mutation {
+  createJob(name: String!): Job!
+  updateJobStatus(name: String!, status: JobState!): Job!
+}
+
+type Subscription {
+  jobStatuses: [Job!]!
+}
