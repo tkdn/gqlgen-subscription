@@ -15,3 +15,5 @@ require (
 	golang.org/x/text v0.38.0 // indirect
 	golang.org/x/tools v0.46.0 // indirect
 )
+
+tool github.com/99designs/gqlgen
