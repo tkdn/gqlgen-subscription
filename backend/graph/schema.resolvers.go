@@ -7,29 +7,74 @@ package graph
 
 import (
 	"context"
-	"fmt"
+	"log"
 
 	"github.com/tkdn/gqlgen-subscription/backend/graph/model"
+	"github.com/tkdn/gqlgen-subscription/backend/userctx"
 )
 
 // CreateJob is the resolver for the createJob field.
 func (r *mutationResolver) CreateJob(ctx context.Context, name string) (*model.Job, error) {
-	panic(fmt.Errorf("not implemented: CreateJob - createJob"))
+	return r.JobStore.Create(ctx, userctx.UserID(ctx), name)
 }
 
 // UpdateJobStatus is the resolver for the updateJobStatus field.
 func (r *mutationResolver) UpdateJobStatus(ctx context.Context, name string, status model.JobState) (*model.Job, error) {
-	panic(fmt.Errorf("not implemented: UpdateJobStatus - updateJobStatus"))
+	return r.JobStore.UpdateStatus(ctx, userctx.UserID(ctx), name, status)
 }
 
 // Jobs is the resolver for the jobs field.
 func (r *queryResolver) Jobs(ctx context.Context) ([]*model.Job, error) {
-	panic(fmt.Errorf("not implemented: Jobs - jobs"))
+	return r.JobStore.List(ctx, userctx.UserID(ctx))
 }
 
 // JobStatuses is the resolver for the jobStatuses field.
 func (r *subscriptionResolver) JobStatuses(ctx context.Context) (<-chan []*model.Job, error) {
-	panic(fmt.Errorf("not implemented: JobStatuses - jobStatuses"))
+	userID := userctx.UserID(ctx)
+
+	notify, unsubscribe, err := r.Hub.Subscribe(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	ch := make(chan []*model.Job, 1)
+
+	// 接続直後に初期スナップショットを配信する。
+	initial, err := r.JobStore.List(ctx, userID)
+	if err != nil {
+		unsubscribe()
+		return nil, err
+	}
+	ch <- initial
+
+	go func() {
+		defer close(ch)
+		defer unsubscribe()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case _, ok := <-notify:
+				if !ok {
+					return
+				}
+				jobs, err := r.JobStore.List(ctx, userID)
+				if err != nil {
+					// 検証目的のためログのみ出力し、既存の購読は継続する。
+					log.Printf("jobStatuses: list jobs for %q: %v", userID, err)
+					continue
+				}
+				select {
+				case ch <- jobs:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	return ch, nil
 }
 
 // Mutation returns MutationResolver implementation.
