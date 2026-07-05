@@ -2,25 +2,84 @@
 
 package model
 
-type Mutation struct {
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"strconv"
+)
+
+type Job struct {
+	Name   string   `json:"name"`
+	Status JobState `json:"status"`
 }
 
-type NewTodo struct {
-	Text   string `json:"text"`
-	UserID string `json:"userId"`
+type Mutation struct {
 }
 
 type Query struct {
 }
 
-type Todo struct {
-	ID   string `json:"id"`
-	Text string `json:"text"`
-	Done bool   `json:"done"`
-	User *User  `json:"user"`
+type Subscription struct {
 }
 
-type User struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+type JobState string
+
+const (
+	JobStatePending    JobState = "PENDING"
+	JobStateAnalyzing  JobState = "ANALYZING"
+	JobStateGenerating JobState = "GENERATING"
+	JobStateCompleted  JobState = "COMPLETED"
+	JobStateFailed     JobState = "FAILED"
+)
+
+var AllJobState = []JobState{
+	JobStatePending,
+	JobStateAnalyzing,
+	JobStateGenerating,
+	JobStateCompleted,
+	JobStateFailed,
+}
+
+func (e JobState) IsValid() bool {
+	switch e {
+	case JobStatePending, JobStateAnalyzing, JobStateGenerating, JobStateCompleted, JobStateFailed:
+		return true
+	}
+	return false
+}
+
+func (e JobState) String() string {
+	return string(e)
+}
+
+func (e *JobState) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = JobState(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid JobState", str)
+	}
+	return nil
+}
+
+func (e JobState) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *JobState) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e JobState) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
 }
