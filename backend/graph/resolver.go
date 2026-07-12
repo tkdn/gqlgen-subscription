@@ -25,7 +25,15 @@ type Hub interface {
 	Subscribe(userID string) (ch <-chan struct{}, unsubscribe func(), err error)
 }
 
+// JobDispatcher はresolverが必要とする非同期ワーカーへのジョブ投入層の
+// インターフェース。実装は sqsdispatch.Dispatcher が満たす。単体テストでは
+// モックに差し替える。
+type JobDispatcher interface {
+	Dispatch(ctx context.Context, userID string, job *model.Job) error
+}
+
 type Resolver struct {
-	JobStore JobStore
-	Hub      Hub
+	JobStore   JobStore
+	Hub        Hub
+	Dispatcher JobDispatcher
 }

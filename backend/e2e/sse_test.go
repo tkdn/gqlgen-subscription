@@ -15,9 +15,19 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/tkdn/gqlgen-subscription/backend/graph"
+	"github.com/tkdn/gqlgen-subscription/backend/graph/model"
 	"github.com/tkdn/gqlgen-subscription/backend/jobstore"
 	"github.com/tkdn/gqlgen-subscription/backend/pubsub"
 )
+
+// noopDispatcher はgraph.JobDispatcherの何もしない実装。SQS投入自体を検証
+// しないテスト（SSE配信の疎通確認等）で、Resolverの必須フィールドを埋める
+// ために使う。
+type noopDispatcher struct{}
+
+func (noopDispatcher) Dispatch(ctx context.Context, userID string, job *model.Job) error {
+	return nil
+}
 
 // testDB は本番用(DB0)や他パッケージのテストと衝突しないよう、
 // このパッケージ専用のRedis DB番号を使う。
@@ -51,8 +61,9 @@ func newTestServer(t *testing.T) *httptest.Server {
 	})
 
 	resolver := &graph.Resolver{
-		JobStore: jobstore.New(rdb),
-		Hub:      pubsub.New(rdb),
+		JobStore:   jobstore.New(rdb),
+		Hub:        pubsub.New(rdb),
+		Dispatcher: noopDispatcher{},
 	}
 
 	server := httptest.NewServer(graph.NewHandler(resolver))

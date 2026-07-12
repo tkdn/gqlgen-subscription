@@ -51,6 +51,15 @@ func (m *mockHub) Subscribe(userID string) (<-chan struct{}, func(), error) {
 	return m.subscribeFn(userID)
 }
 
+// mockJobDispatcher はgraph.JobDispatcherのテスト用実装。
+type mockJobDispatcher struct {
+	dispatchFn func(ctx context.Context, userID string, job *model.Job) error
+}
+
+func (m *mockJobDispatcher) Dispatch(ctx context.Context, userID string, job *model.Job) error {
+	return m.dispatchFn(ctx, userID, job)
+}
+
 func TestMutationResolver_CreateJob(t *testing.T) {
 	ctx := testContext(t)
 	wantUserID := userctx.UserID(ctx)
@@ -63,7 +72,16 @@ func TestMutationResolver_CreateJob(t *testing.T) {
 		},
 	}
 
-	r := (&graph.Resolver{JobStore: store}).Mutation()
+	var gotDispatchUserID string
+	var gotDispatchJob *model.Job
+	dispatcher := &mockJobDispatcher{
+		dispatchFn: func(ctx context.Context, userID string, job *model.Job) error {
+			gotDispatchUserID, gotDispatchJob = userID, job
+			return nil
+		},
+	}
+
+	r := (&graph.Resolver{JobStore: store, Dispatcher: dispatcher}).Mutation()
 
 	job, err := r.CreateJob(ctx, "job-1")
 	if err != nil {
@@ -77,6 +95,34 @@ func TestMutationResolver_CreateJob(t *testing.T) {
 	}
 	if job.Status != model.JobStatePending {
 		t.Errorf("CreateJob() job.Status = %v, want PENDING", job.Status)
+	}
+	if gotDispatchUserID != wantUserID {
+		t.Errorf("CreateJob() dispatched with userID = %q, want %q", gotDispatchUserID, wantUserID)
+	}
+	if gotDispatchJob != job {
+		t.Errorf("CreateJob() dispatched job = %+v, want the same job returned by JobStore.Create", gotDispatchJob)
+	}
+}
+
+func TestMutationResolver_CreateJob_PropagatesDispatchError(t *testing.T) {
+	ctx := testContext(t)
+	wantErr := errors.New("dispatch boom")
+
+	store := &mockJobStore{
+		createFn: func(ctx context.Context, userID, name string) (*model.Job, error) {
+			return &model.Job{Name: name, Status: model.JobStatePending}, nil
+		},
+	}
+	dispatcher := &mockJobDispatcher{
+		dispatchFn: func(ctx context.Context, userID string, job *model.Job) error {
+			return wantErr
+		},
+	}
+
+	r := (&graph.Resolver{JobStore: store, Dispatcher: dispatcher}).Mutation()
+
+	if _, err := r.CreateJob(ctx, "job-1"); !errors.Is(err, wantErr) {
+		t.Fatalf("CreateJob() error = %v, want wrapping %v", err, wantErr)
 	}
 }
 

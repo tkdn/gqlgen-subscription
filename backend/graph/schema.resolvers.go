@@ -7,6 +7,7 @@ package graph
 
 import (
 	"context"
+	"fmt"
 	"log"
 
 	"github.com/tkdn/gqlgen-subscription/backend/graph/model"
@@ -15,7 +16,16 @@ import (
 
 // CreateJob is the resolver for the createJob field.
 func (r *mutationResolver) CreateJob(ctx context.Context, name string) (*model.Job, error) {
-	return r.JobStore.Create(ctx, userctx.UserID(ctx), name)
+	userID := userctx.UserID(ctx)
+
+	job, err := r.JobStore.Create(ctx, userID, name)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.Dispatcher.Dispatch(ctx, userID, job); err != nil {
+		return nil, fmt.Errorf("dispatch job: %w", err)
+	}
+	return job, nil
 }
 
 // UpdateJobStatus is the resolver for the updateJobStatus field.
