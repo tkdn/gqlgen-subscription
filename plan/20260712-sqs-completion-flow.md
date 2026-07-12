@@ -232,10 +232,12 @@ type completionMessage struct {
 }
 ```
 
-ループ本体は`Run`関数として切り出し、`main()`からも、e2eテストからも直接呼べるようにする（`graph.NewHandler`と同じ「共有コンストラクタ」の慣習を踏襲）。
+ループ本体は`Run`関数として切り出す。Goの`package main`は外部からimportできないため、`backend/cmd/workersim`ではなく`backend/workersim`（フラット、`consumer`パッケージと同じ配置方針）に`Run`関数を置き、`cmd/workersim/main.go`はこれを呼ぶ薄い起動コードのみにする。e2eテストは`workersim.Run`を直接importして呼べる。
 
 ```go
-// backend/cmd/workersim/run.go
+// backend/workersim/workersim.go
+package workersim
+
 func Run(ctx context.Context, client *sqs.Client, requestsURL, completionsURL string, delay time.Duration) error
 ```
 
@@ -264,7 +266,7 @@ Hubは不要（consumerはSSEを配信しない。Redis Publishは`jobstore.Stor
 - `backend/awsconfig/awsconfig_test.go`: kumoに対する実結合テスト。到達不能なら`t.Skipf`（Redis不在時と同じパターン）。`EnsureQueue`を2回呼んで同じURLが返ることを確認。
 - `backend/sqsdispatch/dispatch_test.go`: kumoに対する実結合テスト。テストごとに一意なキュー名を使い、テスト間のメッセージ混入を避ける。
 - `backend/consumer/consumer_test.go`: `Run`が受信したメッセージから`UpdateStatus`を正しく呼ぶことを検証する結合テスト（実Redis DB15 + kumo）。不正な`status`値のメッセージが渡された場合に削除されること（再配信ループに入らないこと）も確認する。
-- `backend/cmd/workersim`自体には単体テストを作らない（`cmd/main.go`も単体テストを持たない既存の慣習に合わせ、e2eテストでのみカバーする）。`fail-`プレフィックスでの失敗注入はe2eテストで確認する。
+- `backend/workersim/workersim_test.go`: `fail-`プレフィックスでの失敗注入ロジック（`Status: "COMPLETED"`か`"FAILED"`かの判定）を単体テストで確認する。長時間の待機を伴う結合テスト（kumo相手にキュー経由で一連の流れを検証するもの）は、e2eテストでカバーし、ここでは作らない。
 - **e2eテスト**（`backend/e2e/sqs_completion_test.go`、既存の`sse_test.go`と同じDB13を再利用）: `workersim.Run`をin-processのgoroutineとして起動し、`consumer.Run`も同様にin-processで起動する（`cmd/main.go`同様、テストサーバー構築時に一緒に起動する）。`delay`は数百ミリ秒程度の短い値を直接パラメータとして渡す（`WORKERSIM_DELAY`環境変数には依存しない）。2ケース検証する: (1) 通常のjob名で`createJob`→SSE購読で`COMPLETED`状態のスナップショットが届くこと、(2) `fail-`プレフィックスのjob名で`createJob`→SSE購読で`FAILED`状態が届くこと。kumoが起動していなければ`t.Skipf`。
 
 ## 9. 実装ステップ（1ステップ=1コミット+1 critレビュー）
@@ -274,7 +276,7 @@ Hubは不要（consumerはSSEを配信しない。Redis Publishは`jobstore.Stor
 3. `backend/awsconfig`パッケージ（kumo向けAWS設定・SQSクライアント・キュー冪等作成）+ テスト
 4. `docker-compose.yml`にkumoサービス追加（実際のイメージ・ヘルスチェックを確認して設定）
 5. `backend/sqsdispatch`パッケージ + `graph.JobDispatcher`インターフェース + `createJob`リゾルバ変更 + 既存テストのDispatcherダブル追加
-6. `backend/cmd/workersim`バイナリ（`Run`関数切り出し + `fail-`プレフィックス失敗注入込み）
+6. `backend/workersim`パッケージ（`Run`関数 + `fail-`プレフィックス失敗注入） + 薄い`cmd/workersim/main.go`
 7. `backend/consumer`パッケージ（`Run`関数） + `cmd/main.go`へのgoroutine統合 + テスト
 8. e2eテスト（`sqs_completion_test.go`、通常系・失敗系の両方）
 9. ドキュメント更新: `docs/architecture.md`に実装結果の追記セクション、`README.md`に起動手順・動作確認手順を追加
