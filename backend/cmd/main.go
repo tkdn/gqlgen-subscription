@@ -13,6 +13,7 @@ import (
 	"github.com/99designs/gqlgen/graphql/playground"
 
 	"github.com/tkdn/gqlgen-subscription/backend/awsconfig"
+	"github.com/tkdn/gqlgen-subscription/backend/consumer"
 	"github.com/tkdn/gqlgen-subscription/backend/graph"
 	"github.com/tkdn/gqlgen-subscription/backend/jobstore"
 	"github.com/tkdn/gqlgen-subscription/backend/pubsub"
@@ -21,8 +22,9 @@ import (
 )
 
 const (
-	defaultPort       = "8080"
-	requestsQueueName = "job-requests"
+	defaultPort          = "8080"
+	requestsQueueName    = "job-requests"
+	completionsQueueName = "job-completions"
 )
 
 func main() {
@@ -47,9 +49,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("ensure queue %q: %v", requestsQueueName, err)
 	}
+	completionsURL, err := awsconfig.EnsureQueue(ctx, sqsClient, completionsQueueName)
+	if err != nil {
+		log.Fatalf("ensure queue %q: %v", completionsQueueName, err)
+	}
+
+	jobStore := jobstore.New(rdb)
 
 	resolver := &graph.Resolver{
-		JobStore:   jobstore.New(rdb),
+		JobStore:   jobStore,
 		Hub:        pubsub.New(rdb),
 		Dispatcher: sqsdispatch.New(sqsClient, requestsURL),
 	}
@@ -62,6 +70,12 @@ func main() {
 		Addr:    ":" + port,
 		Handler: mux,
 	}
+
+	go func() {
+		if err := consumer.Run(ctx, sqsClient, jobStore, completionsURL); err != nil {
+			log.Printf("consumer: %v", err)
+		}
+	}()
 
 	go func() {
 		log.Printf("connect to http://localhost:%s/ for GraphQL playground", port)
