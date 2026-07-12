@@ -114,23 +114,21 @@ Task Aが完了通知を受けてDBを更新しても、そのユーザーのSSE
 - タスク数だけでなく、タスク内の並列数（goroutine数など）も制御し、「タスク数 × 並列数 × 下流API呼び出し数」の総量を意識する。
 - SQSはat-least-once配信のため、Consumer側の更新処理は冪等にする（例: `WHERE status != 'completed'` 条件付きUPDATE、または処理済みイベントIDを記録するInboxテーブル）。
 
-## 7. 本リポジトリでの現在の実装との関係（覚書）
+## 7. 本リポジトリでの現在の実装との関係（覚書、[`plan/20260712-sqs-completion-flow.md`](../plan/20260712-sqs-completion-flow.md)実装後のスナップショット）
 
-現在の実装は「サービスAの内部構造」の検証に主眼があり、サービスBは実装されていない（ジョブの状態変化は検証用mutationで直接発生させる）。上記で整理した考え方と、現在の実装がどう関係しそうかのメモ。
+サービスBは[kumo](https://github.com/sivchari/kumo)（ローカルAWSエミュレーター）上のSQSを介した`backend/workersim`として実際に動いている（形式的なワーカーで、受信後一定時間待って完了通知を返すのみ）。上記で整理した考え方と、現在の実装がどう関係しているかのメモ。
 
 | 考え方 | 現在の実装との関係 |
 |---|---|
-| 完了通知はイベントとして扱う | `jobstore.Store.save` が更新のたびに `job:updates:<userID>` チャンネルへPublishしている（[`backend/jobstore/store.go`](../backend/jobstore/store.go)）。検証用mutationからの状態変化をイベントとして扱う形になっている |
-| 相関ID | ジョブ名 (`name`) をキー・チャンネル名の両方に用いて紐付けている |
-| DBが正本、配信はイベント駆動 | Redis Hash (`job:<userID>:<name>`) が正本。Publishはトリガーのみ（`chan struct{}`）で、受信側は `List` を呼び直して全件スナップショットを取得する方式（[`backend/pubsub/hub.go`](../backend/pubsub/hub.go) 参照）。ポーリングはしていない |
-| プロセス分割はスケール要件で決める | GraphQL API・Redis Subscribe（Consumer相当）は同一プロセス（`backend/cmd/main.go`）に同居している。水平スケールは検証範囲外 |
-| 冪等性 | 検証用mutationは都度上書き（`HSet`）で完結するため、現状は問題にならない |
+| 完了通知はイベントとして扱う | `backend/workersim`がSQS完了キューへ完了メッセージを送り、`backend/consumer`がそれを受けて`jobstore.Store.UpdateStatus`を呼ぶ。`UpdateStatus`成功時に`jobstore.Store.save`が`job:updates:<userID>`チャンネルへPublishする（[`backend/jobstore/store.go`](../backend/jobstore/store.go)）という経路になっている |
+| 相関ID | `job_id`（UUIDv7、`jobstore.Store.Create`が採番）がRedisの実体キーの一部になっており、名実ともに一意な主キー。SQSメッセージにも一貫して載せて運ぶ |
+| DBが正本、配信はイベント駆動 | Redis Hash (`job:<userID>:<job_id>`) が正本。Publishはトリガーのみ（`chan struct{}`）で、受信側は `List` を呼び直して全件スナップショットを取得する方式（[`backend/pubsub/hub.go`](../backend/pubsub/hub.go) 参照）。ポーリングはしていない |
+| プロセス分割はスケール要件で決める | GraphQL API・Consumer（SQS完了通知の受信）は同一プロセス（`backend/cmd/main.go`）に同居している。サービスBの形式的ワーカー（`backend/workersim`）だけは別プロセス（`backend/cmd/workersim`）。水平スケールは検証範囲外 |
+| 冪等性 | 未実装（後述の§8参照）。今回のworkersimは1ジョブにつき完了メッセージを1通しか送らないため、重複・順序の問題自体が起きない |
 
-## 8. §7以降に実際にやったこと（[`plan/20260712-sqs-completion-flow.md`](../plan/20260712-sqs-completion-flow.md)）
+## 8. §7に至るまでにやったこと・分かったこと
 
-§7までは検証用mutationで状態変化を直接シミュレートしていたが、その後実際に[kumo](https://github.com/sivchari/kumo)（ローカルAWSエミュレーター）を使い、SQS Standardキュー経由の非同期パイプラインを組んでみた。あくまでローカル検証の範囲（実AWSへのデプロイは対象外）。
-
-やってみて分かったこと・変えたこと：
+§6までは検証用mutationで状態変化を直接シミュレートしており、サービスBも実装されていなかった。ここから実際にSQS Standardキュー経由の非同期パイプラインを組んでみて分かったこと・変えたことをまとめる。
 
 - **相関ID(`job_id`)は「Hashに生えた属性」ではなく「実キー」にする方が素直だった。** 当初`Job.id`を追加した際、Redisの実体キーは従来通り`job:<userID>:<name>`のままで、`id`はそこに付け足したフィールドに過ぎなかった。しかしこれだと`name`が依然として唯一の実キーであり続け、(1) 同一ユーザーが同名で`createJob`すると上書きされて古いジョブのUUIDが失われる、(2) `UpdateStatus`が`job_id`を知らないまま`name`で書き込むため、SQS完了メッセージから直接呼ぶ経路が不自然、という歪みが出た。実体キーを`job:<userID>:<job_id>`に変え、`job_id`（UUIDv7）を名実ともに主キーにしたところ、両方解消した。
 - **§5で「最初は同一プロセスに同居させる」としていた考え方を、実際にそのまま採用した。** SQS完了通知を受け取るConsumerを別バイナリにする案も検討したが、複雑化を避けるため撤回し、`backend/consumer`パッケージの`Run`関数を`cmd/main.go`内のgoroutineとして起動する構成にした。
