@@ -19,8 +19,8 @@ func (r *mutationResolver) CreateJob(ctx context.Context, name string) (*model.J
 }
 
 // UpdateJobStatus is the resolver for the updateJobStatus field.
-func (r *mutationResolver) UpdateJobStatus(ctx context.Context, name string, status model.JobState) (*model.Job, error) {
-	return r.JobStore.UpdateStatus(ctx, userctx.UserID(ctx), name, status)
+func (r *mutationResolver) UpdateJobStatus(ctx context.Context, id string, status model.JobState) (*model.Job, error) {
+	return r.JobStore.UpdateStatus(ctx, userctx.UserID(ctx), id, status)
 }
 
 // Jobs is the resolver for the jobs field.

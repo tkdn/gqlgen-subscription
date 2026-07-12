@@ -26,7 +26,7 @@ func testContext(t *testing.T) (ctx context.Context) {
 // 用意した戻り値をそのまま返す。
 type mockJobStore struct {
 	createFn func(ctx context.Context, userID, name string) (*model.Job, error)
-	updateFn func(ctx context.Context, userID, name string, status model.JobState) (*model.Job, error)
+	updateFn func(ctx context.Context, userID, jobID string, status model.JobState) (*model.Job, error)
 	listFn   func(ctx context.Context, userID string) ([]*model.Job, error)
 }
 
@@ -34,8 +34,8 @@ func (m *mockJobStore) Create(ctx context.Context, userID, name string) (*model.
 	return m.createFn(ctx, userID, name)
 }
 
-func (m *mockJobStore) UpdateStatus(ctx context.Context, userID, name string, status model.JobState) (*model.Job, error) {
-	return m.updateFn(ctx, userID, name, status)
+func (m *mockJobStore) UpdateStatus(ctx context.Context, userID, jobID string, status model.JobState) (*model.Job, error) {
+	return m.updateFn(ctx, userID, jobID, status)
 }
 
 func (m *mockJobStore) List(ctx context.Context, userID string) ([]*model.Job, error) {
@@ -84,12 +84,12 @@ func TestMutationResolver_UpdateJobStatus(t *testing.T) {
 	ctx := testContext(t)
 	wantUserID := userctx.UserID(ctx)
 
-	var gotUserID, gotName string
+	var gotUserID, gotJobID string
 	var gotStatus model.JobState
 	store := &mockJobStore{
-		updateFn: func(ctx context.Context, userID, name string, status model.JobState) (*model.Job, error) {
-			gotUserID, gotName, gotStatus = userID, name, status
-			return &model.Job{Name: name, Status: status}, nil
+		updateFn: func(ctx context.Context, userID, jobID string, status model.JobState) (*model.Job, error) {
+			gotUserID, gotJobID, gotStatus = userID, jobID, status
+			return &model.Job{ID: jobID, Status: status}, nil
 		},
 	}
 
@@ -99,9 +99,9 @@ func TestMutationResolver_UpdateJobStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateJobStatus() error = %v", err)
 	}
-	if gotUserID != wantUserID || gotName != "job-1" || gotStatus != model.JobStateAnalyzing {
+	if gotUserID != wantUserID || gotJobID != "job-1" || gotStatus != model.JobStateAnalyzing {
 		t.Errorf("UpdateJobStatus() called with (%q, %q, %v), want (%q, %q, %v)",
-			gotUserID, gotName, gotStatus, wantUserID, "job-1", model.JobStateAnalyzing)
+			gotUserID, gotJobID, gotStatus, wantUserID, "job-1", model.JobStateAnalyzing)
 	}
 	if job.Status != model.JobStateAnalyzing {
 		t.Errorf("UpdateJobStatus() job.Status = %v, want ANALYZING", job.Status)

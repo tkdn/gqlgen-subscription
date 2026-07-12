@@ -18,7 +18,7 @@ type Query {
 
 type Mutation {
   createJob(name: String!): Job!
-  updateJobStatus(name: String!, status: JobState!): Job!
+  updateJobStatus(id: ID!, status: JobState!): Job!
 }
 
 type Subscription {

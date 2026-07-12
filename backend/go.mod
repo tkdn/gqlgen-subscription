@@ -4,6 +4,7 @@ go 1.26.2
 
 require (
 	github.com/99designs/gqlgen v0.17.93
+	github.com/cmackenzie1/go-uuid v1.2.0
 	github.com/redis/go-redis/v9 v9.21.0
 	github.com/vektah/gqlparser/v2 v2.5.35
 )

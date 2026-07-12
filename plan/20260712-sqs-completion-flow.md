@@ -15,7 +15,7 @@
 
 ## 確定した設計判断
 
-- **相関IDの運び方**: 完了メッセージは `job_id` 単独ではなく `(userID, name, job_id)` を運ぶ。理由: `jobstore.Store.UpdateStatus`は既に`name`でジョブを特定する設計であり、`job_id`→`name`の逆引きインデックスを新設するメリットがない。`job_id`はログ・将来の冪等性検討用の相関IDとして載せるのみで、今回は照合には使わない。
+- **相関IDの運び方**: 完了メッセージは `(userID, job_id, status)` を運ぶ。`name`は運ばない。理由: Redisの実体キー自体を`name`ベースから`job_id`ベースに変更する（後述）ため、`job_id`だけでジョブを一意に特定でき、`name`→`id`や`id`→`name`の逆引きが不要になる。
 - **SQSキュー種別**: Standard（FIFOは不採用）。workersimは1ジョブにつき完了メッセージを1通しか送らないため、順序入れ替わりは本質的に発生しない。重複自体は`HSet`が冪等操作のため実害なし。
 - **冪等性**: 今回は未実装。既知の課題として記録するのみ。
 - **Dispatch失敗時の挙動**: `createJob`内でRedis作成は成功したがSQS投入が失敗した場合、mutation自体をエラーにする（best-effortで握り潰さない）。ローカル検証では「createJobが成功した=workersimが必ず起動される」という単純な保証の方が扱いやすい。
@@ -24,7 +24,7 @@
 
 ## 1. スキーマ・モデル変更
 
-`backend/graph/schema.graphqls`に`Job.id: ID!`を追加。`createJob`/`updateJobStatus`/`jobs`のシグネチャ自体は変更しない（`id`はレスポンスに追加されるフィールド）。`go tool gqlgen generate`で再生成。
+`backend/graph/schema.graphqls`に`Job.id: ID!`を追加する。加えて、`updateJobStatus`の第一引数を`name: String!`から`id: ID!`に変更する（後述のRedisキー設計変更に合わせ、クライアントもidでジョブを指定する形に揃える）。`createJob`/`jobs`のシグネチャは変更しない。`go tool gqlgen generate`で再生成する。
 
 ```graphql
 type Job {
@@ -32,39 +32,88 @@ type Job {
   name: String!
   status: JobState!
 }
+
+type Mutation {
+  createJob(name: String!): Job!
+  updateJobStatus(id: ID!, status: JobState!): Job!
+}
 ```
 
-## 2. `jobstore.Store` 変更
+`schema.resolvers.go`の`UpdateJobStatus`も`id`を受け取って`JobStore.UpdateStatus`に渡す形に変わる。
 
-`Create`でUUIDを採番し、Redis Hashに`id`フィールドとして保存。`UpdateStatus`は`id`を再指定しない（空文字列で上書きしないよう`save()`側でガードする）。
+## 2. `jobstore.Store` 変更（Redisキー設計の見直しを含む）
+
+critレビューで「job_id導入を機にRedisのデータシェイプ自体を見直してよい」との指摘を受け、実体キーを`name`ベースから`job_id`ベースに変更する。理由: `id`を単にHashの1フィールドとして付け足すだけだと、`name`が依然として唯一の実キーであり続け、(1) 同一ユーザーが同名で`createJob`すると上書きされてUUIDが失われる、(2) `UpdateStatus`が`job_id`を知らないまま`name`で書き込むため、SQS完了メッセージから直接`UpdateStatus`を呼ぶ経路が不自然になる、という歪みが生じるため。
+
+### 新しいキー設計
+
+```
+user:<userID>:jobs         Set<job_id>              # 索引: job_idのSet（TTLなし）
+job:<userID>:<job_id>      Hash{id, name, status}    # 実体（TTL 5分）
+job:updates:<userID>       Pub/Sub channel           # 変更なし
+```
+
+`id`（UUIDv7、`github.com/cmackenzie1/go-uuid`の`uuid.NewV7()`で採番）が実体キーの一部になり、名実ともに一意な主キーになる。UUIDv7を選ぶ理由は時刻順ソート可能な性質を持ち、将来Redis以外のストアに移行した場合もキーの局所性を保てるため（本プロジェクトのGoバージョンはUUID標準ライブラリ化前のGo 1.26.2であり、`google/uuid`ではなくこのライブラリを明示的に採用する）。
 
 ```go
 func (s *Store) Create(ctx context.Context, userID, name string) (*model.Job, error) {
-    job := &model.Job{ID: uuid.NewString(), Name: name, Status: model.JobStatePending}
+    id, err := uuid.NewV7()
+    if err != nil {
+        return nil, fmt.Errorf("jobstore: generate job id: %w", err)
+    }
+    job := &model.Job{ID: id.String(), Name: name, Status: model.JobStatePending}
     if err := s.save(ctx, userID, job); err != nil {
         return nil, err
     }
     return job, nil
 }
 
+// UpdateStatus は job_id でジョブを直接特定する（name は経由しない）。
+func (s *Store) UpdateStatus(ctx context.Context, userID, jobID string, status model.JobState) (*model.Job, error) {
+    job := &model.Job{ID: jobID, Status: status}
+    if err := s.save(ctx, userID, job); err != nil {
+        return nil, err
+    }
+    return job, nil // name はsave()内でHGetAllせず、呼び出し側は必要ならListで取得する
+}
+
+func jobKey(userID, jobID string) string {
+    return fmt.Sprintf("job:%s:%s", userID, jobID)
+}
+
 func (s *Store) save(ctx context.Context, userID string, job *model.Job) error {
-    key := jobKey(userID, job.Name)
-    fields := map[string]any{"status": string(job.Status)}
-    if job.ID != "" {
-        fields["id"] = job.ID
+    key := jobKey(userID, job.ID)
+    fields := map[string]any{"id": job.ID, "status": string(job.Status)}
+    if job.Name != "" {
+        fields["name"] = job.Name
     }
     if err := s.rdb.HSet(ctx, key, fields).Err(); err != nil {
         return fmt.Errorf("jobstore: save job: %w", err)
     }
-    // Expire / SAdd / Publish は既存のまま
+    if err := s.rdb.Expire(ctx, key, jobTTL).Err(); err != nil {
+        return fmt.Errorf("jobstore: set ttl: %w", err)
+    }
+    if err := s.rdb.SAdd(ctx, indexKey(userID), job.ID).Err(); err != nil {
+        return fmt.Errorf("jobstore: index job: %w", err)
+    }
+    if err := s.rdb.Publish(ctx, updatesChannel(userID), "").Err(); err != nil {
+        return fmt.Errorf("jobstore: publish update: %w", err)
+    }
+    return nil
 }
 ```
 
-`List()`は`fields["id"]`を読み取って`model.Job.ID`にセットする。新規Redisキーは追加しない（既存Hashにフィールドを1つ足すのみ）。
+`UpdateStatus`は`job.Name`を持たないため、`save()`は`name`フィールドを空文字列で上書きしないようガードする（`Create`時に一度書いた`name`は`UpdateStatus`では保持される）。
 
-`github.com/google/uuid`を直接依存として追加（既にgqlgenのUUIDスカラー経由でindirect依存として`go.sum`に存在するため、バージョン競合は起きない見込み）。
+`List()`は索引Setのメンバーが`job_id`になった点以外は構造が同じ（各`job_id`について`HGetAll`し、`fields["name"]`・`fields["status"]`・`fields["id"]`（`= job_id`と同じ値）から`model.Job`を組み立てる）。
 
-テスト追加（`store_test.go`、DB15）: `Create`が空でない`ID`を返すこと、`List`が同じ`ID`を返すこと、`UpdateStatus`が`ID`を変更しないこと（作成→ID取得→ステータス更新→再取得→ID不変を確認）。
+新規依存: `github.com/cmackenzie1/go-uuid`（`go get`で追加、バージョンは実装時に解決）。
+
+テスト追加・変更（`store_test.go`、DB15）:
+- `Create`が空でない`ID`を返すこと、`List`が同じ`ID`を返すこと
+- `UpdateStatus`は`jobID`引数で特定すること（`name`ではなく作成時に得た`ID`を渡す形にテストを書き換える）
+- 同一ユーザーが同じ`name`で`Create`を2回呼んでも、両方が別ジョブとして`List`に残ること（旧設計での上書き問題が解消したことの回帰テスト）
+- 既存の`TestListGarbageCollectsExpiredIndex`等、Redisキー文字列を直接組み立てているテストは`job:<userID>:<id>`形式に書き換える
 
 ## 3. 共有AWS/SQSクライアントパッケージ: `backend/awsconfig`
 
@@ -173,7 +222,15 @@ func (d *Dispatcher) Dispatch(ctx context.Context, userID string, job *model.Job
 
 `job-requests`をlong polling。メッセージ受信ごとに、待機（デフォルト10秒、`WORKERSIM_DELAY`環境変数でDuration文字列として上書き可能）→完了メッセージ送信→元の依頼メッセージを削除。
 
-**意図的な失敗の注入**: job名が`fail-`で始まる場合、`Status: "COMPLETED"`ではなく`Status: "FAILED"`を送信する（例: `fail-timeout`, `fail-anything`）。これにより検証時に任意のタイミングで失敗パスを再現できる。ハードコードされた`const failNamePrefix = "fail-"`で判定し、確率的な失敗注入は導入しない（テストの再現性を優先する）。
+**意図的な失敗の注入**: job名が`fail-`で始まる場合、`Status: "COMPLETED"`ではなく`Status: "FAILED"`を送信する（例: `fail-timeout`, `fail-anything`）。これにより検証時に任意のタイミングで失敗パスを再現できる。ハードコードされた`const failNamePrefix = "fail-"`で判定し、確率的な失敗注入は導入しない（テストの再現性を優先する）。判定には依頼メッセージに含まれる`Name`を使うが、完了メッセージ自体には`Name`を含めない（`job_id`のみでConsumerが処理できるため）。
+
+```go
+type completionMessage struct {
+    UserID string `json:"user_id"`
+    JobID  string `json:"job_id"`
+    Status string `json:"status"`
+}
+```
 
 ループ本体は`Run`関数として切り出し、`main()`からも、e2eテストからも直接呼べるようにする（`graph.NewHandler`と同じ「共有コンストラクタ」の慣習を踏襲）。
 
@@ -186,7 +243,7 @@ func Run(ctx context.Context, client *sqs.Client, requestsURL, completionsURL st
 
 ## 7. Consumer（`cmd/main.go`内のgoroutine）
 
-`job-completions`をlong polling。メッセージごとに`completionMessage{UserID, Name, JobID, Status}`をUnmarshalし、`model.JobState(status).IsValid()`を確認した上で`jobstore.Store.UpdateStatus(ctx, userID, name, status)`を呼ぶ。成功したらメッセージ削除、失敗時は削除せず再配信に任せる（冪等性は今回未実装のため許容）。
+`job-completions`をlong polling。メッセージごとに`completionMessage{UserID, JobID, Status}`をUnmarshalし（`name`は運ばない。`jobstore.Store`の実体キーが`job_id`ベースになったため不要）、`model.JobState(status).IsValid()`を確認した上で`jobstore.Store.UpdateStatus(ctx, userID, jobID, status)`を呼ぶ。成功したらメッセージ削除、失敗時は削除せず再配信に任せる（冪等性は今回未実装のため許容）。
 
 別バイナリではなく、`backend/consumer`パッケージ（フラット、`cmd/`配下ではない）に`Run`関数を切り出し、`cmd/main.go`の`main()`からgoroutineとして起動する。e2eテストからも同じ関数を直接呼べる。
 
@@ -212,8 +269,8 @@ Hubは不要（consumerはSSEを配信しない。Redis Publishは`jobstore.Stor
 
 ## 9. 実装ステップ（1ステップ=1コミット+1 critレビュー）
 
-1. スキーマ+モデル: `Job.id`追加、`gqlgen generate`
-2. `jobstore.Store`: `job_id`採番・保存・読み出し + テスト
+1. スキーマ+モデル: `Job.id`追加、`updateJobStatus`引数を`id: ID!`に変更、`gqlgen generate`
+2. `jobstore.Store`: 実体キーを`name`ベースから`job_id`ベースに変更（UUIDv7採番・保存・読み出し）+ `schema.resolvers.go`のUpdateJobStatus対応 + テスト
 3. `backend/awsconfig`パッケージ（kumo向けAWS設定・SQSクライアント・キュー冪等作成）+ テスト
 4. `docker-compose.yml`にkumoサービス追加（実際のイメージ・ヘルスチェックを確認して設定）
 5. `backend/sqsdispatch`パッケージ + `graph.JobDispatcher`インターフェース + `createJob`リゾルバ変更 + 既存テストのDispatcherダブル追加

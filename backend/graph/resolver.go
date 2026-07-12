@@ -15,7 +15,7 @@ import (
 // 実装は jobstore.Store が満たす。単体テストではモックに差し替える。
 type JobStore interface {
 	Create(ctx context.Context, userID, name string) (*model.Job, error)
-	UpdateStatus(ctx context.Context, userID, name string, status model.JobState) (*model.Job, error)
+	UpdateStatus(ctx context.Context, userID, jobID string, status model.JobState) (*model.Job, error)
 	List(ctx context.Context, userID string) ([]*model.Job, error)
 }
 

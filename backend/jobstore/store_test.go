@@ -77,16 +77,66 @@ func TestCreateAndList(t *testing.T) {
 	}
 }
 
+func TestCreateAssignsID(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := t.Context()
+	const userID = "jobstore-test-user-a"
+
+	created, err := store.Create(ctx, userID, "job-1")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.ID == "" {
+		t.Fatal("Create() ID is empty, want a non-empty UUID")
+	}
+
+	jobs, err := store.List(ctx, userID)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != created.ID {
+		t.Fatalf("List() = %+v, want ID %q to be echoed back", jobs, created.ID)
+	}
+}
+
+func TestCreateSameNameTwiceProducesTwoJobs(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := t.Context()
+	const userID = "jobstore-test-user-a"
+
+	first, err := store.Create(ctx, userID, "job-1")
+	if err != nil {
+		t.Fatalf("Create() #1 error = %v", err)
+	}
+	second, err := store.Create(ctx, userID, "job-1")
+	if err != nil {
+		t.Fatalf("Create() #2 error = %v", err)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("Create() called twice with same name produced identical IDs %q", first.ID)
+	}
+
+	jobs, err := store.List(ctx, userID)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("List() = %+v, want 2 distinct jobs named job-1", jobs)
+	}
+}
+
+// TestUpdateStatus はjobIDでジョブを特定してステータスを更新できることを確認する。
 func TestUpdateStatus(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := t.Context()
 	const userID = "jobstore-test-user-a"
 
-	if _, err := store.Create(ctx, userID, "job-1"); err != nil {
+	created, err := store.Create(ctx, userID, "job-1")
+	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	updated, err := store.UpdateStatus(ctx, userID, "job-1", model.JobStateAnalyzing)
+	updated, err := store.UpdateStatus(ctx, userID, created.ID, model.JobStateAnalyzing)
 	if err != nil {
 		t.Fatalf("UpdateStatus() error = %v", err)
 	}
@@ -100,6 +150,31 @@ func TestUpdateStatus(t *testing.T) {
 	}
 	if len(jobs) != 1 || jobs[0].Status != model.JobStateAnalyzing {
 		t.Fatalf("List() = %+v, want single ANALYZING job-1", jobs)
+	}
+}
+
+// TestUpdateStatusPreservesName はUpdateStatus経由の書き込みが既存のnameフィールドを
+// 空文字列で上書きしないことを確認する回帰テスト。
+func TestUpdateStatusPreservesName(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := t.Context()
+	const userID = "jobstore-test-user-a"
+
+	created, err := store.Create(ctx, userID, "job-1")
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	if _, err := store.UpdateStatus(ctx, userID, created.ID, model.JobStateAnalyzing); err != nil {
+		t.Fatalf("UpdateStatus() error = %v", err)
+	}
+
+	jobs, err := store.List(ctx, userID)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].Name != "job-1" {
+		t.Fatalf("List() = %+v, want name %q to remain unchanged after UpdateStatus", jobs, "job-1")
 	}
 }
 
@@ -136,12 +211,13 @@ func TestListGarbageCollectsExpiredIndex(t *testing.T) {
 	ctx := t.Context()
 	const userID = "jobstore-test-user-a"
 
-	if _, err := store.Create(ctx, userID, "job-1"); err != nil {
+	created, err := store.Create(ctx, userID, "job-1")
+	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 
 	// TTL失効を模擬するため、ジョブ実体（Hash）だけを直接削除する。
-	if err := rdb.Del(ctx, "job:jobstore-test-user-a:job-1").Err(); err != nil {
+	if err := rdb.Del(ctx, "job:jobstore-test-user-a:"+created.ID).Err(); err != nil {
 		t.Fatalf("Del() error = %v", err)
 	}
 
@@ -167,11 +243,12 @@ func TestSaveSetsTTL(t *testing.T) {
 	ctx := t.Context()
 	const userID = "jobstore-test-user-a"
 
-	if _, err := store.Create(ctx, userID, "job-1"); err != nil {
+	created, err := store.Create(ctx, userID, "job-1")
+	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	ttl, err := rdb.TTL(ctx, "job:jobstore-test-user-a:job-1").Result()
+	ttl, err := rdb.TTL(ctx, "job:jobstore-test-user-a:"+created.ID).Result()
 	if err != nil {
 		t.Fatalf("TTL() error = %v", err)
 	}

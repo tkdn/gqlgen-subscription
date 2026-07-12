@@ -46,7 +46,7 @@ type ComplexityRoot struct {
 
 	Mutation struct {
 		CreateJob       func(childComplexity int, name string) int
-		UpdateJobStatus func(childComplexity int, name string, status model.JobState) int
+		UpdateJobStatus func(childComplexity int, id string, status model.JobState) int
 	}
 
 	Query struct {
@@ -64,7 +64,7 @@ type ComplexityRoot struct {
 
 type MutationResolver interface {
 	CreateJob(ctx context.Context, name string) (*model.Job, error)
-	UpdateJobStatus(ctx context.Context, name string, status model.JobState) (*model.Job, error)
+	UpdateJobStatus(ctx context.Context, id string, status model.JobState) (*model.Job, error)
 }
 type QueryResolver interface {
 	Jobs(ctx context.Context) ([]*model.Job, error)
@@ -131,7 +131,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Mutation.UpdateJobStatus(childComplexity, args["name"].(string), args["status"].(model.JobState)), true
+		return e.ComplexityRoot.Mutation.UpdateJobStatus(childComplexity, args["id"].(string), args["status"].(model.JobState)), true
 
 	case "Query.jobs":
 		if e.ComplexityRoot.Query.Jobs == nil {
@@ -410,14 +410,14 @@ func (ec *executionContext) field_Mutation_createJob_args(ctx context.Context, r
 func (ec *executionContext) field_Mutation_updateJobStatus_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
-	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "name",
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
 		func(ctx context.Context, v any) (string, error) {
-			return ec.unmarshalNString2string(ctx, v)
+			return ec.unmarshalNID2string(ctx, v)
 		})
 	if err != nil {
 		return nil, err
 	}
-	args["name"] = arg0
+	args["id"] = arg0
 	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "status",
 		func(ctx context.Context, v any) (model.JobState, error) {
 			return ec.unmarshalNJobState2githubᚗcomᚋtkdnᚋgqlgenᚑsubscriptionᚋbackendᚋgraphᚋmodelᚐJobState(ctx, v)
@@ -626,7 +626,7 @@ func (ec *executionContext) _Mutation_updateJobStatus(ctx context.Context, field
 		},
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Mutation().UpdateJobStatus(ctx, fc.Args["name"].(string), fc.Args["status"].(model.JobState))
+			return ec.Resolvers.Mutation().UpdateJobStatus(ctx, fc.Args["id"].(string), fc.Args["status"].(model.JobState))
 		},
 		nil,
 		func(ctx context.Context, selections ast.SelectionSet, v *model.Job) graphql.Marshaler {

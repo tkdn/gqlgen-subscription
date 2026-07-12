@@ -128,10 +128,27 @@ type jobStatusesPayload struct {
 	} `json:"data"`
 }
 
+// createJobPayload はcreateJob mutationのdataペイロードの形。
+type createJobPayload struct {
+	Data struct {
+		CreateJob struct {
+			ID string `json:"id"`
+		} `json:"createJob"`
+	} `json:"data"`
+}
+
 func TestSSESubscription_DeliversInitialSnapshotAndUpdates(t *testing.T) {
 	server := newTestServer(t)
 
-	graphqlRequest(t, server.URL+"/query", `mutation { createJob(name: "job-1") { name status } }`)
+	createResp := graphqlRequest(t, server.URL+"/query", `mutation { createJob(name: "job-1") { id name status } }`)
+	var created createJobPayload
+	if err := json.Unmarshal(createResp, &created); err != nil {
+		t.Fatalf("unmarshal createJob response: %v", err)
+	}
+	jobID := created.Data.CreateJob.ID
+	if jobID == "" {
+		t.Fatalf("createJob response has empty id: %s", createResp)
+	}
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, server.URL+"/query",
 		strings.NewReader(`{"query": "subscription { jobStatuses { name status } }"}`))
@@ -174,13 +191,13 @@ func TestSSESubscription_DeliversInitialSnapshotAndUpdates(t *testing.T) {
 	go func() {
 		defer close(updateDone)
 		graphqlRequest(t, server.URL+"/query",
-			`mutation { updateJobStatus(name: "job-1", status: ANALYZING) { name status } }`)
+			fmt.Sprintf(`mutation { updateJobStatus(id: %q, status: ANALYZING) { name status } }`, jobID))
 	}()
 	<-updateDone
 
 	type result struct {
-		ev  sseEvent
-		ok  bool
+		ev sseEvent
+		ok bool
 	}
 	resultCh := make(chan result, 1)
 	go func() {
