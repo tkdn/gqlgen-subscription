@@ -125,3 +125,18 @@ Task Aが完了通知を受けてDBを更新しても、そのユーザーのSSE
 | DBが正本、配信はイベント駆動 | Redis Hash (`job:<userID>:<name>`) が正本。Publishはトリガーのみ（`chan struct{}`）で、受信側は `List` を呼び直して全件スナップショットを取得する方式（[`backend/pubsub/hub.go`](../backend/pubsub/hub.go) 参照）。ポーリングはしていない |
 | プロセス分割はスケール要件で決める | GraphQL API・Redis Subscribe（Consumer相当）は同一プロセス（`backend/cmd/main.go`）に同居している。水平スケールは検証範囲外 |
 | 冪等性 | 検証用mutationは都度上書き（`HSet`）で完結するため、現状は問題にならない |
+
+## 8. §7以降に実際にやったこと（[`plan/20260712-sqs-completion-flow.md`](../plan/20260712-sqs-completion-flow.md)）
+
+§7までは検証用mutationで状態変化を直接シミュレートしていたが、その後実際に[kumo](https://github.com/sivchari/kumo)（ローカルAWSエミュレーター）を使い、SQS Standardキュー経由の非同期パイプラインを組んでみた。あくまでローカル検証の範囲（実AWSへのデプロイは対象外）。
+
+やってみて分かったこと・変えたこと：
+
+- **相関ID(`job_id`)は「Hashに生えた属性」ではなく「実キー」にする方が素直だった。** 当初`Job.id`を追加した際、Redisの実体キーは従来通り`job:<userID>:<name>`のままで、`id`はそこに付け足したフィールドに過ぎなかった。しかしこれだと`name`が依然として唯一の実キーであり続け、(1) 同一ユーザーが同名で`createJob`すると上書きされて古いジョブのUUIDが失われる、(2) `UpdateStatus`が`job_id`を知らないまま`name`で書き込むため、SQS完了メッセージから直接呼ぶ経路が不自然、という歪みが出た。実体キーを`job:<userID>:<job_id>`に変え、`job_id`（UUIDv7）を名実ともに主キーにしたところ、両方解消した。
+- **§5で「最初は同一プロセスに同居させる」としていた考え方を、実際にそのまま採用した。** SQS完了通知を受け取るConsumerを別バイナリにする案も検討したが、複雑化を避けるため撤回し、`backend/consumer`パッケージの`Run`関数を`cmd/main.go`内のgoroutineとして起動する構成にした。
+- **サービスBの形式的なワーカー(`backend/workersim`)も、`backend/cmd/main.go`と同じ発想で「本体ロジックはフラットパッケージ、`cmd/`配下は薄い起動コードのみ」という配置にした。** これはGoの`package main`が外部からimportできない制約による — e2eテストから`Run`関数を直接呼びたかったため。
+- **workersimには`fail-`プレフィックスによる意図的な失敗注入を入れた。** 確率的な失敗ではなく、job名のプレフィックスで確定的にFAILEDを再現できるようにしている（検証の再現性を優先）。
+- **AWS SDK v2の設定（`backend/awsconfig`）は、リージョン・認証情報・エンドポイントを一切コード側で決め打ちせず、SDKの標準解決チェーンに完全に委ねた。** ローカル検証時は`AWS_ENDPOINT_URL`等の環境変数で、実AWS移行時はECSタスクロール等でそれぞれ解決される想定で、環境が変わってもコード変更が要らないようにしている。
+- **§6で挙げていた「タスク間の通知共有」「冪等性」の課題は、今回のスコープでは顕在化しなかった。** workersimが1ジョブにつき完了メッセージを1通しか送らないため、重複・順序の問題が起きる状況自体がない。単一プロセス構成のため、Consumerが受けた通知とSSE接続が別タスクに分かれる問題も発生しない。これらは将来水平スケールや複数状態遷移メッセージを扱うようになった時点で再検討する。
+
+実際に`createJob` mutation → SQS依頼キュー → workersim → SQS完了キュー → Consumer → Redis更新 → SSE配信、というエンドツーエンドの流れをローカルで手動確認・e2eテスト（`backend/e2e/sqs_completion_test.go`）の両方で確認できている。
