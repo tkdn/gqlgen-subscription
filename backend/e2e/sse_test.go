@@ -15,9 +15,19 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/tkdn/gqlgen-subscription/backend/graph"
+	"github.com/tkdn/gqlgen-subscription/backend/graph/model"
 	"github.com/tkdn/gqlgen-subscription/backend/jobstore"
 	"github.com/tkdn/gqlgen-subscription/backend/pubsub"
 )
+
+// noopDispatcher はgraph.JobDispatcherの何もしない実装。SQS投入自体を検証
+// しないテスト（SSE配信の疎通確認等）で、Resolverの必須フィールドを埋める
+// ために使う。
+type noopDispatcher struct{}
+
+func (noopDispatcher) Dispatch(ctx context.Context, userID string, job *model.Job) error {
+	return nil
+}
 
 // testDB は本番用(DB0)や他パッケージのテストと衝突しないよう、
 // このパッケージ専用のRedis DB番号を使う。
@@ -51,8 +61,9 @@ func newTestServer(t *testing.T) *httptest.Server {
 	})
 
 	resolver := &graph.Resolver{
-		JobStore: jobstore.New(rdb),
-		Hub:      pubsub.New(rdb),
+		JobStore:   jobstore.New(rdb),
+		Hub:        pubsub.New(rdb),
+		Dispatcher: noopDispatcher{},
 	}
 
 	server := httptest.NewServer(graph.NewHandler(resolver))
@@ -128,10 +139,27 @@ type jobStatusesPayload struct {
 	} `json:"data"`
 }
 
+// createJobPayload はcreateJob mutationのdataペイロードの形。
+type createJobPayload struct {
+	Data struct {
+		CreateJob struct {
+			ID string `json:"id"`
+		} `json:"createJob"`
+	} `json:"data"`
+}
+
 func TestSSESubscription_DeliversInitialSnapshotAndUpdates(t *testing.T) {
 	server := newTestServer(t)
 
-	graphqlRequest(t, server.URL+"/query", `mutation { createJob(name: "job-1") { name status } }`)
+	createResp := graphqlRequest(t, server.URL+"/query", `mutation { createJob(name: "job-1") { id name status } }`)
+	var created createJobPayload
+	if err := json.Unmarshal(createResp, &created); err != nil {
+		t.Fatalf("unmarshal createJob response: %v", err)
+	}
+	jobID := created.Data.CreateJob.ID
+	if jobID == "" {
+		t.Fatalf("createJob response has empty id: %s", createResp)
+	}
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, server.URL+"/query",
 		strings.NewReader(`{"query": "subscription { jobStatuses { name status } }"}`))
@@ -174,13 +202,13 @@ func TestSSESubscription_DeliversInitialSnapshotAndUpdates(t *testing.T) {
 	go func() {
 		defer close(updateDone)
 		graphqlRequest(t, server.URL+"/query",
-			`mutation { updateJobStatus(name: "job-1", status: ANALYZING) { name status } }`)
+			fmt.Sprintf(`mutation { updateJobStatus(id: %q, status: ANALYZING) { name status } }`, jobID))
 	}()
 	<-updateDone
 
 	type result struct {
-		ev  sseEvent
-		ok  bool
+		ev sseEvent
+		ok bool
 	}
 	resultCh := make(chan result, 1)
 	go func() {

@@ -12,13 +12,20 @@ import (
 
 	"github.com/99designs/gqlgen/graphql/playground"
 
+	"github.com/tkdn/gqlgen-subscription/backend/awsconfig"
+	"github.com/tkdn/gqlgen-subscription/backend/consumer"
 	"github.com/tkdn/gqlgen-subscription/backend/graph"
 	"github.com/tkdn/gqlgen-subscription/backend/jobstore"
 	"github.com/tkdn/gqlgen-subscription/backend/pubsub"
 	"github.com/tkdn/gqlgen-subscription/backend/redisclient"
+	"github.com/tkdn/gqlgen-subscription/backend/sqsdispatch"
 )
 
-const defaultPort = "8080"
+const (
+	defaultPort          = "8080"
+	requestsQueueName    = "job-requests"
+	completionsQueueName = "job-completions"
+)
 
 func main() {
 	port := os.Getenv("PORT")
@@ -29,9 +36,30 @@ func main() {
 	rdb := redisclient.New()
 	defer rdb.Close()
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	awsCfg, err := awsconfig.New(ctx)
+	if err != nil {
+		log.Fatalf("aws config: %v", err)
+	}
+	sqsClient := awsconfig.SQSClient(awsCfg)
+
+	requestsURL, err := awsconfig.EnsureQueue(ctx, sqsClient, requestsQueueName)
+	if err != nil {
+		log.Fatalf("ensure queue %q: %v", requestsQueueName, err)
+	}
+	completionsURL, err := awsconfig.EnsureQueue(ctx, sqsClient, completionsQueueName)
+	if err != nil {
+		log.Fatalf("ensure queue %q: %v", completionsQueueName, err)
+	}
+
+	jobStore := jobstore.New(rdb)
+
 	resolver := &graph.Resolver{
-		JobStore: jobstore.New(rdb),
-		Hub:      pubsub.New(rdb),
+		JobStore:   jobStore,
+		Hub:        pubsub.New(rdb),
+		Dispatcher: sqsdispatch.New(sqsClient, requestsURL),
 	}
 
 	mux := http.NewServeMux()
@@ -43,8 +71,11 @@ func main() {
 		Handler: mux,
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	go func() {
+		if err := consumer.Run(ctx, sqsClient, jobStore, completionsURL); err != nil {
+			log.Printf("consumer: %v", err)
+		}
+	}()
 
 	go func() {
 		log.Printf("connect to http://localhost:%s/ for GraphQL playground", port)

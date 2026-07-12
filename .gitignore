@@ -1,0 +1,19 @@
+# Go
+*.o
+*.a
+*.so
+/backend/bin/
+*.test
+*.out
+go.work
+go.work.sum
+
+# direnv
+.envrc
+
+# System files
+.DS_Store
+Thumbs.db
+
+# tmp scratch files
+/tmp

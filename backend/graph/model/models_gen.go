@@ -10,6 +10,7 @@ import (
 )
 
 type Job struct {
+	ID     string   `json:"id"`
 	Name   string   `json:"name"`
 	Status JobState `json:"status"`
 }

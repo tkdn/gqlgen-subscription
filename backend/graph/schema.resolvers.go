@@ -7,6 +7,7 @@ package graph
 
 import (
 	"context"
+	"fmt"
 	"log"
 
 	"github.com/tkdn/gqlgen-subscription/backend/graph/model"
@@ -15,12 +16,21 @@ import (
 
 // CreateJob is the resolver for the createJob field.
 func (r *mutationResolver) CreateJob(ctx context.Context, name string) (*model.Job, error) {
-	return r.JobStore.Create(ctx, userctx.UserID(ctx), name)
+	userID := userctx.UserID(ctx)
+
+	job, err := r.JobStore.Create(ctx, userID, name)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.Dispatcher.Dispatch(ctx, userID, job); err != nil {
+		return nil, fmt.Errorf("dispatch job: %w", err)
+	}
+	return job, nil
 }
 
 // UpdateJobStatus is the resolver for the updateJobStatus field.
-func (r *mutationResolver) UpdateJobStatus(ctx context.Context, name string, status model.JobState) (*model.Job, error) {
-	return r.JobStore.UpdateStatus(ctx, userctx.UserID(ctx), name, status)
+func (r *mutationResolver) UpdateJobStatus(ctx context.Context, id string, status model.JobState) (*model.Job, error) {
+	return r.JobStore.UpdateStatus(ctx, userctx.UserID(ctx), id, status)
 }
 
 // Jobs is the resolver for the jobs field.
@@ -91,18 +101,3 @@ type (
 	queryResolver        struct{ *Resolver }
 	subscriptionResolver struct{ *Resolver }
 )
-
-// !!! WARNING !!!
-// The code below was going to be deleted when updating resolvers. It has been copied here so you have
-// one last chance to move it out of harms way if you want. There are two reasons this happens:
-//  - When renaming or deleting a resolver the old code will be put in here. You can safely delete
-//    it when you're done.
-//  - You have helper methods in this file. Move them out to keep these resolver files clean.
-/*
-	func (r *mutationResolver) CreateTodo(ctx context.Context, input model.NewTodo) (*model.Todo, error) {
-	panic(fmt.Errorf("not implemented: CreateTodo - createTodo"))
-}
-func (r *queryResolver) Todos(ctx context.Context) ([]*model.Todo, error) {
-	panic(fmt.Errorf("not implemented: Todos - todos"))
-}
-*/

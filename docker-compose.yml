@@ -8,3 +8,13 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  kumo:
+    image: ghcr.io/sivchari/kumo:latest
+    ports:
+      - "4566:4566"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "4566"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
