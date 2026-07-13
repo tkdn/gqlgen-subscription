@@ -12,7 +12,12 @@ import (
 // here.
 
 // JobStore はresolverが必要とするジョブ永続化層のインターフェース。
-// 実装は jobstore.Store が満たす。単体テストではモックに差し替える。
+// 実装は pgjobstore.Store（本番配線）と jobstore.Store（Redisの参照実装）が
+// 満たす。単体テストではモックに差し替える。
+//
+// UpdateStatusの冪等保証（終端状態COMPLETED/FAILEDからの遷移拒否）は
+// 実装依存: pgjobstore.Store は保証し、jobstore.Store は保証しない
+// （upsert・遷移制約なしのまま凍結された参照実装）。
 type JobStore interface {
 	Create(ctx context.Context, userID, name string) (*model.Job, error)
 	UpdateStatus(ctx context.Context, userID, jobID string, status model.JobState) (*model.Job, error)
@@ -20,7 +25,8 @@ type JobStore interface {
 }
 
 // Hub はresolverが必要とするジョブ更新通知のfan-out層のインターフェース。
-// 実装は pubsub.Hub が満たす。単体テストではモックに差し替える。
+// 実装は pgpubsub.Hub（本番配線）と pubsub.Hub（Redisの参照実装）が満たす。
+// 単体テストではモックに差し替える。
 type Hub interface {
 	Subscribe(userID string) (ch <-chan struct{}, unsubscribe func(), err error)
 }

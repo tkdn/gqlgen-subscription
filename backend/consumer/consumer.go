@@ -11,8 +11,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
 	"github.com/tkdn/gqlgen-subscription/backend/graph/model"
-	"github.com/tkdn/gqlgen-subscription/backend/jobstore"
 )
+
+// JobStatusUpdater はConsumerが完了通知の反映に必要とするストア操作の
+// インターフェース。jobstore.Store（Redis）とpgjobstore.Store（PostgreSQL）
+// の両方が満たす。
+type JobStatusUpdater interface {
+	UpdateStatus(ctx context.Context, userID, jobID string, status model.JobState) (*model.Job, error)
+}
 
 // completionMessage はworkersimが送信する完了メッセージのペイロード。
 // nameは運ばれない（jobstore.Storeの実体キーがjob_idベースのため不要）。
@@ -24,7 +30,7 @@ type completionMessage struct {
 
 // Run はcompletionsURLをlong pollingし、メッセージごとにjobstore.Store.UpdateStatus
 // を呼んでジョブの状態を更新する。ctxがキャンセルされるとポーリングループを終了する。
-func Run(ctx context.Context, client *sqs.Client, store *jobstore.Store, completionsURL string) error {
+func Run(ctx context.Context, client *sqs.Client, store JobStatusUpdater, completionsURL string) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -62,8 +68,10 @@ func Run(ctx context.Context, client *sqs.Client, store *jobstore.Store, complet
 			}
 
 			if _, err := store.UpdateStatus(ctx, comp.UserID, comp.JobID, status); err != nil {
-				// 冪等性は今回未実装のため、削除せず可視性タイムアウト後の
-				// 再配信に任せる。
+				// エラー時はメッセージを削除せず、可視性タイムアウト後の再配信に
+				// 任せる。正常系での重複メッセージ耐性（終端状態からの遷移拒否）は
+				// JobStatusUpdater実装側の責務（pgjobstore.Storeは保証、
+				// jobstore.Storeは保証しない。graph.JobStoreのコメント参照）。
 				log.Printf("consumer: update status failed for job_id=%s, will redeliver: %v", comp.JobID, err)
 				continue
 			}

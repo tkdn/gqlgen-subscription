@@ -114,17 +114,17 @@ Task Aが完了通知を受けてDBを更新しても、そのユーザーのSSE
 - タスク数だけでなく、タスク内の並列数（goroutine数など）も制御し、「タスク数 × 並列数 × 下流API呼び出し数」の総量を意識する。
 - SQSはat-least-once配信のため、Consumer側の更新処理は冪等にする（例: `WHERE status != 'completed'` 条件付きUPDATE、または処理済みイベントIDを記録するInboxテーブル）。
 
-## 7. 本リポジトリでの現在の実装との関係（覚書、[`plan/20260712-sqs-completion-flow.md`](../plan/20260712-sqs-completion-flow.md)実装後のスナップショット）
+## 7. 本リポジトリでの現在の実装との関係（覚書、[`plan/20260713-postgres-notify-listen.md`](../plan/20260713-postgres-notify-listen.md)実装後のスナップショット）
 
-サービスBは[kumo](https://github.com/sivchari/kumo)（ローカルAWSエミュレーター）上のSQSを介した`backend/workersim`として実際に動いている（形式的なワーカーで、受信後一定時間待って完了通知を返すのみ）。上記で整理した考え方と、現在の実装がどう関係しているかのメモ。
+サービスBは[kumo](https://github.com/sivchari/kumo)（ローカルAWSエミュレーター）上のSQSを介した`backend/workersim`として実際に動いている（形式的なワーカーで、受信後一定時間待って完了通知を返すのみ）。ジョブの正本と更新通知は、RedisからPostgreSQL（NOTIFY/LISTEN）へ移行済み（§9参照。Redis実装は参照実装としてテストごと残置）。上記で整理した考え方と、現在の実装がどう関係しているかのメモ。
 
 | 考え方 | 現在の実装との関係 |
 |---|---|
-| 完了通知はイベントとして扱う | `backend/workersim`がSQS完了キューへ完了メッセージを送り、`backend/consumer`がそれを受けて`jobstore.Store.UpdateStatus`を呼ぶ。`UpdateStatus`成功時に`jobstore.Store.save`が`job:updates:<userID>`チャンネルへPublishする（[`backend/jobstore/store.go`](../backend/jobstore/store.go)）という経路になっている |
-| 相関ID | `job_id`（UUIDv7、`jobstore.Store.Create`が採番）がRedisの実体キーの一部になっており、名実ともに一意な主キー。SQSメッセージにも一貫して載せて運ぶ |
-| DBが正本、配信はイベント駆動 | Redis Hash (`job:<userID>:<job_id>`) が正本。Publishはトリガーのみ（`chan struct{}`）で、受信側は `List` を呼び直して全件スナップショットを取得する方式（[`backend/pubsub/hub.go`](../backend/pubsub/hub.go) 参照）。ポーリングはしていない |
+| 完了通知はイベントとして扱う | `backend/workersim`がSQS完了キューへ完了メッセージを送り、`backend/consumer`がそれを受けて`pgjobstore.Store.UpdateStatus`を呼ぶ。UPDATEと`pg_notify`は同一トランザクションで実行され、通知はコミット成功時のみ配送される（[`backend/pgjobstore/store.go`](../backend/pgjobstore/store.go)） |
+| 相関ID | `job_id`（UUIDv7、`pgjobstore.Store.Create`が採番）が`jobs`テーブルの主キー。SQSメッセージにも一貫して載せて運ぶ |
+| DBが正本、配信はイベント駆動 | PostgreSQLの`jobs`テーブルが正本。NOTIFYはトリガーのみ（ペイロードは購読者振り分け用のuserIDだけでジョブ内容は運ばない）で、受信側は `List` を呼び直して全件スナップショットを取得する方式（[`backend/pgpubsub/hub.go`](../backend/pgpubsub/hub.go) 参照）。ポーリングはしていない |
 | プロセス分割はスケール要件で決める | GraphQL API・Consumer（SQS完了通知の受信）は同一プロセス（`backend/cmd/main.go`）に同居している。サービスBの形式的ワーカー（`backend/workersim`）だけは別プロセス（`backend/cmd/workersim`）。水平スケールは検証範囲外 |
-| 冪等性 | 未実装（後述の§8参照）。今回のworkersimは1ジョブにつき完了メッセージを1通しか送らないため、重複・順序の問題自体が起きない |
+| 冪等性 | 実装済み。終端状態（COMPLETED/FAILED）に達したジョブへの更新は条件付きUPDATEで黙って無視され、通知も発行されない（§9参照）。SQSのat-least-once配信で完了メッセージが重複しても2回目以降は何も起こさない |
 
 ## 8. §7に至るまでにやったこと・分かったこと
 
@@ -135,6 +135,18 @@ Task Aが完了通知を受けてDBを更新しても、そのユーザーのSSE
 - **サービスBの形式的なワーカー(`backend/workersim`)も、`backend/cmd/main.go`と同じ発想で「本体ロジックはフラットパッケージ、`cmd/`配下は薄い起動コードのみ」という配置にした。** これはGoの`package main`が外部からimportできない制約による — e2eテストから`Run`関数を直接呼びたかったため。
 - **workersimには`fail-`プレフィックスによる意図的な失敗注入を入れた。** 確率的な失敗ではなく、job名のプレフィックスで確定的にFAILEDを再現できるようにしている（検証の再現性を優先）。
 - **AWS SDK v2の設定（`backend/awsconfig`）は、リージョン・認証情報・エンドポイントを一切コード側で決め打ちせず、SDKの標準解決チェーンに完全に委ねた。** ローカル検証時は`AWS_ENDPOINT_URL`等の環境変数で、実AWS移行時はECSタスクロール等でそれぞれ解決される想定で、環境が変わってもコード変更が要らないようにしている。
-- **§6で挙げていた「タスク間の通知共有」「冪等性」の課題は、今回のスコープでは顕在化しなかった。** workersimが1ジョブにつき完了メッセージを1通しか送らないため、重複・順序の問題が起きる状況自体がない。単一プロセス構成のため、Consumerが受けた通知とSSE接続が別タスクに分かれる問題も発生しない。これらは将来水平スケールや複数状態遷移メッセージを扱うようになった時点で再検討する。
+- **§6で挙げていた「タスク間の通知共有」「冪等性」の課題は、今回のスコープでは顕在化しなかった。** workersimが1ジョブにつき完了メッセージを1通しか送らないため、重複・順序の問題が起きる状況自体がない。単一プロセス構成のため、Consumerが受けた通知とSSE接続が別タスクに分かれる問題も発生しない。これらは将来水平スケールや複数状態遷移メッセージを扱うようになった時点で再検討する。（→ 冪等性は§9のPostgreSQL移行で前倒しで実装した）
 
-実際に`createJob` mutation → SQS依頼キュー → workersim → SQS完了キュー → Consumer → Redis更新 → SSE配信、というエンドツーエンドの流れをローカルで手動確認・e2eテスト（`backend/e2e/sqs_completion_test.go`）の両方で確認できている。
+実際に`createJob` mutation → SQS依頼キュー → workersim → SQS完了キュー → Consumer → DB更新 → SSE配信、というエンドツーエンドの流れをローカルで手動確認・e2eテスト（`backend/e2e/sqs_completion_test.go`）の両方で確認できている。
+
+## 9. PostgreSQL NOTIFY/LISTEN移行でやったこと・分かったこと
+
+§8まではジョブの正本がRedis Hash、更新通知がRedis Pub/Subだった。[`docs/20260712-brushup-feasibility.md`](./20260712-brushup-feasibility.md)の見立てに基づき、両方をPostgreSQLへ移行して分かったこと・変えたことをまとめる。
+
+- **RedisのHSETとPUBLISHは別コマンドのため、2コマンドの間でプロセスが落ちると「DBは更新されたのに通知だけが失われる」取りこぼしが起こりうる。** Postgresでは更新と`pg_notify`を同一トランザクションに入れられ、通知はコミット成功時のみ配送されるため、この問題が構造的に消える。「DBが正本、Publishはトリガーのみ」という§4の考え方に対して、Redisより忠実な実装になった。
+- **接続モデルは「ユーザーごとにSubscribe接続」から「単一LISTEN接続＋ペイロードで振り分け」へ変えた。** Redis版をそのまま写すとアクティブユーザー数ぶん接続が増え`max_connections`を圧迫する。単一チャンネル（`job_updates`）のペイロードにuserIDを載せ、Hub内で購読者へデマルチプレクスする構造にした結果、ユーザー数が増えてもDB接続は増えない。LISTENが起動時に確立済みになったことで、Redis版にあった「SUBSCRIBE受理を待ってから返す」race対策も構造的に不要になった。
+- **冪等化（§6・§8で先送りしていた課題）を実装した。** 終端状態（COMPLETED/FAILED）からの遷移を条件付きUPDATE（`WHERE status NOT IN ('COMPLETED','FAILED')`）で拒否する。no-op時はエラーではなく現在の行を返し、通知も発行しない。エラーにしないのは、SQS再配信で同じ完了メッセージが二重処理されたときにConsumerがメッセージを正常に削除できる（エラーだと無限再配信になる）ようにするため。
+- **NOTIFYチャンネル名はStoreとHubの両方に明示的に渡す配線にした。** 発行側と購読側が同じチャンネル名を共有するという結合は消せないため、暗黙の共有（パッケージ内定数の参照）より、`main.go`で両者に同じ値を渡して結合を可視化する方を選んだ。テストがパッケージごとに専用チャンネルで分離できる（NOTIFYチャンネルはスキーマスコープではなくDBグローバル）という実利もある。
+- **Redis版の5分TTLは廃止し、ジョブは永続化した。** 検証データの掃除は`TRUNCATE jobs`で行う。
+- **§6(1)で挙げた「通知を受けたタスクと配信先の接続を持つタスクが一致しない」問題は、通知基盤がDB側に外部化されたことで、水平スケールしても構造的に発生しなくなった。** どのタスクがUPDATEしても、LISTENしている全タスクに通知が届く。
+- **Redis実装（`backend/jobstore`・`backend/pubsub`・`backend/redisclient`）は参照実装としてテストごと残した。** 本番配線（`backend/cmd/main.go`）はPostgres固定。冪等保証が実装依存である旨は`graph.JobStore`のインターフェースコメントに明記している。
