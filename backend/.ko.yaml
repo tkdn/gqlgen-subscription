@@ -1,0 +1,20 @@
+# koのビルド設定。goモジュールルート(backend/)から実行する前提
+# （リポジトリルートにはgo.modがないためkoがimport pathを解決できない）:
+#
+#   KO_DOCKER_REPO=<ECRリポジトリURL> ko build --bare ./cmd/main
+#
+# --bareでKO_DOCKER_REPOをそのままイメージ名にする（デフォルトの
+# <repo>/<basename>-<md5>命名を避け、成果物ごとに専用ECRリポジトリへ
+# 1対1でプッシュするため）。
+#
+# app/workersimはECS Exec検証でcurlと/bin/shが必要なため、curl入りの
+# alpine/curlをベースにする（root・busybox sh入り）。LambdaはRuntime APIを
+# aws-lambda-go自身が実装しておりベースイメージへの制約がないため、
+# koデフォルトと同じ最小のstaticイメージを明示指定する（curl不要）。
+defaultBaseImage: docker.io/alpine/curl:latest
+
+baseImageOverrides:
+  github.com/tkdn/gqlgen-subscription/backend/cmd/lambda: cgr.dev/chainguard/static:latest
+
+defaultPlatforms:
+  - linux/arm64
