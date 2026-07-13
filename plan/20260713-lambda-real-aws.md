@@ -240,6 +240,18 @@ terraform destroy
 - `aws_ecr_repository`の`force_delete=true`、RDSの`skip_final_snapshot=true`・`deletion_protection=false`により、destroyが失敗しないようにしている
 - RDSは停止しても7日で自動再起動される仕様（[AWS公式ドキュメント](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_StopInstance.html)）があるため、「止めて再開」ではなく検証後は都度`terraform destroy`する運用とする
 
+## 実装時の決定事項（2026-07-14追記）
+
+実装の過程で、計画で留保していた点・計画に欠けていた点を以下のとおり確定した。
+
+1. **VPCエンドポイントを4つ追加**（計画からの逸脱・ユーザー承認済み）。NAT GatewayなしのプライベートサブネットではFargateタスクの起動要件（ECRからのイメージpull・secretsブロック解決・awslogs送信）が計画の4エンドポイントだけでは満たせないため、`ecr.api`・`ecr.dkr`・`secretsmanager`・`logs`（Interface型）と`s3`（Gateway型・無料）を追加した。Lambdaのイメージは関数作成時にLambdaサービス側が取得・キャッシュするためVPC経路不要でこの問題を受けない。Interface型エンドポイントは検証用途でAZ冗長不要のため単一サブネットに置き時間課金を抑える
+2. **決定14の検証結果**: Lambdaのbase imageに特有の制約はなかった。`aws-lambda-go`がLambda Runtime APIをプロセス内で実装するため任意のLinuxベースで動く。curl入りbase（`alpine/curl`）はapp/workersim用とし、Lambdaはkoデフォルト相当の`cgr.dev/chainguard/static`を`baseImageOverrides`で明示指定（Lambdaにcurlは不要）。3イメージともローカルの`ko build --local`でビルド成功、app内のcurl/shell/root実行を確認済み
+3. **koの実行位置と命名**: リポジトリルートにgo.modがないため`ko build ./backend/cmd/main`（計画の記載）は不可。`backend/`から実行し、appのimport pathは`./cmd`（main.goが`cmd/`直下）。成果物とECRリポジトリを1対1対応させるため`--bare`を使う。`.ko.yaml`は`backend/.ko.yaml`
+4. **決定15の解決**: 段階的apply手順（ECR先行→ko push→フルapply）・ECS Exec検証手順・クリーンアップはすべて`terraform/README.md`に記録した。イメージ実在がTerraformのリソースグラフで表現できない依存であること、`:latest`再pushをTerraformが検知しないことも同READMEに明記
+5. **WORKERSIM_DELAYは3sに短縮**（ユーザー承認済み）。ECS Exec検証での待ち時間短縮を優先
+6. **Lambda環境変数の暗号化はAWS管理キー（aws/lambda）** を使うため、実行ロールへの明示的な`kms:Decrypt`は不要（計画のIAM節はCMK前提の記載だった）
+7. **`PGSSLMODE=require`** をapp・Lambdaともに設定（RDS PostgreSQL 15以降のデフォルトパラメータグループは`rds.force_ssl=1`のため）
+
 ## スコープ外（今回含めないこと、方針ドキュメントの既定に加えて）
 
 - ECS・Lambdaのデプロイ自動化ツール（ecspresso・lambroll）導入。両方とも別タスクとして先送り
