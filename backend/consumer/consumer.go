@@ -11,8 +11,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
 	"github.com/tkdn/gqlgen-subscription/backend/graph/model"
-	"github.com/tkdn/gqlgen-subscription/backend/jobstore"
 )
+
+// JobStatusUpdater はConsumerが完了通知の反映に必要とするストア操作の
+// インターフェース。jobstore.Store（Redis）とpgjobstore.Store（PostgreSQL）
+// の両方が満たす。
+type JobStatusUpdater interface {
+	UpdateStatus(ctx context.Context, userID, jobID string, status model.JobState) (*model.Job, error)
+}
 
 // completionMessage はworkersimが送信する完了メッセージのペイロード。
 // nameは運ばれない（jobstore.Storeの実体キーがjob_idベースのため不要）。
@@ -24,7 +30,7 @@ type completionMessage struct {
 
 // Run はcompletionsURLをlong pollingし、メッセージごとにjobstore.Store.UpdateStatus
 // を呼んでジョブの状態を更新する。ctxがキャンセルされるとポーリングループを終了する。
-func Run(ctx context.Context, client *sqs.Client, store *jobstore.Store, completionsURL string) error {
+func Run(ctx context.Context, client *sqs.Client, store JobStatusUpdater, completionsURL string) error {
 	for {
 		select {
 		case <-ctx.Done():
