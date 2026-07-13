@@ -9,6 +9,20 @@ services:
       timeout: 3s
       retries: 5
 
+  postgres:
+    image: postgres:18-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   kumo:
     image: ghcr.io/sivchari/kumo:latest
     ports:
