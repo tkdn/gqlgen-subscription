@@ -1,15 +1,27 @@
 # gqlgen-subscription
 
-GraphQL subscriptionによるリアルタイム通知の疎通検証プロジェクト。バックエンド(Go/gqlgen)がジョブの状態変化をRedis Pub/Sub経由で検知し、SSE(Server-Sent Events)でフロントエンド(Angular)へ配信する。
+GraphQL subscriptionによるリアルタイム通知の疎通検証プロジェクト。バックエンド(Go/gqlgen)がジョブの状態変化をPostgreSQL NOTIFY/LISTEN経由で検知し、SSE(Server-Sent Events)でフロントエンド(Angular)へ配信する。DB更新と通知発行は同一トランザクションで行われる（[`plan/20260713-postgres-notify-listen.md`](plan/20260713-postgres-notify-listen.md)参照）。
 
-サービスBの完了通知をSQS経由で受け取る非同期パイプラインもローカル検証している（[`docs/architecture.md`](docs/architecture.md)参照）。[kumo](https://github.com/sivchari/kumo)（ローカルAWSエミュレーター）を使い、`createJob` → SQS依頼キュー → workersim（形式的なワーカー）→ SQS完了キュー → Consumer → Redis更新 → SSE配信、という流れを実際に動かせる。
+サービスBの完了通知をSQS経由で受け取る非同期パイプラインもローカル検証している（[`docs/architecture.md`](docs/architecture.md)参照）。[kumo](https://github.com/sivchari/kumo)（ローカルAWSエミュレーター）を使い、`createJob` → SQS依頼キュー → workersim（形式的なワーカー）→ SQS完了キュー → Consumer → PostgreSQL更新 → SSE配信、という流れを実際に動かせる。
+
+Redis実装（`backend/jobstore`・`backend/pubsub`・`backend/redisclient`）は移行前の参照実装としてテストごと残している。docker-composeのredisサービスはそのテストのために残留している。
 
 ## 起動手順
 
-RedisとkumoをDockerで起動する。
+PostgreSQL・Redis・kumoをDockerで起動する。
 
 ```bash
-docker compose up -d redis kumo
+docker compose up -d
+```
+
+PostgreSQL向けの環境変数を設定する（docker-compose.ymlのpostgresサービスに合わせた値）。
+
+```bash
+export PGHOST=localhost
+export PGUSER=app
+export PGPASSWORD=app
+export PGDATABASE=app
+export PGSSLMODE=disable
 ```
 
 kumo（SQSエミュレーター）向けの環境変数を設定する。認証情報はダミー値でよい。
@@ -63,6 +75,13 @@ curl -s http://localhost:8080/query -H 'content-type: application/json' \
   --data '{"query":"query { jobs { id name status } }"}'
 
 # ジョブのステータスを手動で変更する（idはcreateJobのレスポンスから取得したもの）
+# COMPLETED/FAILEDに達したジョブへの更新は黙って無視される（冪等化のため）
 curl -s http://localhost:8080/query -H 'content-type: application/json' \
   --data '{"query":"mutation { updateJobStatus(id: \"<job id>\", status: ANALYZING) { id name status } }"}'
+```
+
+ジョブはPostgreSQLに永続化される（旧Redis実装の5分TTLのような自動揮発はない）。検証データを掃除する場合は次を実行する。
+
+```bash
+docker compose exec postgres psql -U app -d app -c 'TRUNCATE jobs'
 ```
