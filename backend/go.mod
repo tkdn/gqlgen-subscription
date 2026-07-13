@@ -4,6 +4,7 @@ go 1.26.2
 
 require (
 	github.com/99designs/gqlgen v0.17.93
+	github.com/aws/aws-lambda-go v1.54.0
 	github.com/aws/aws-sdk-go-v2 v1.42.1
 	github.com/aws/aws-sdk-go-v2/config v1.32.29
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.45.0
