@@ -83,11 +83,18 @@ func main() {
 		Handler: mux,
 	}
 
-	go func() {
-		if err := consumer.Run(ctx, sqsClient, jobStore, completionsURL); err != nil {
-			log.Printf("consumer: %v", err)
-		}
-	}()
+	// ECS上では完了メッセージの処理をLambdaに一本化するため、consumerを
+	// 無効化する（Lambda発火の検証信号を明確にする）。ローカルでは未設定の
+	// ままconsumerが動く。
+	if os.Getenv("SKIP_COMPLETION_CONSUMER") == "true" {
+		log.Println("completion consumer disabled by SKIP_COMPLETION_CONSUMER")
+	} else {
+		go func() {
+			if err := consumer.Run(ctx, sqsClient, jobStore, completionsURL); err != nil {
+				log.Printf("consumer: %v", err)
+			}
+		}()
+	}
 
 	go func() {
 		log.Printf("connect to http://localhost:%s/ for GraphQL playground", port)
