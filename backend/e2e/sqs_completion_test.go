@@ -9,13 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/tkdn/gqlgen-subscription/backend/awsconfig"
 	"github.com/tkdn/gqlgen-subscription/backend/consumer"
 	"github.com/tkdn/gqlgen-subscription/backend/graph"
-	"github.com/tkdn/gqlgen-subscription/backend/jobstore"
-	"github.com/tkdn/gqlgen-subscription/backend/pubsub"
+	"github.com/tkdn/gqlgen-subscription/backend/pgjobstore"
 	"github.com/tkdn/gqlgen-subscription/backend/sqsdispatch"
 	"github.com/tkdn/gqlgen-subscription/backend/workersim"
 )
@@ -24,32 +21,16 @@ import (
 // (10秒)ではテストが遅くなりすぎるため、短い値を直接パラメータとして渡す。
 const testWorkersimDelay = 300 * time.Millisecond
 
-// newSQSTestServer はnewTestServerと同様にRedis(testDB=13)を使うテスト
-// サーバーを構築するが、Dispatcherにnoopではなく実際のsqsdispatch.Dispatcher
+// newSQSTestServer はnewTestServerと同様にPostgreSQL(スキーマe2e_test)を使う
+// テストサーバーを構築するが、Dispatcherにnoopではなく実際のsqsdispatch.Dispatcher
 // を使い、in-processのworkersim.Run・consumer.Runもgoroutineとして起動する。
-// kumoが起動していなければスキップする。
+// SQSエンドポイントに到達できなければスキップする。
 func newSQSTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 
-	addr := "localhost:6379"
-	rdb := redis.NewClient(&redis.Options{Addr: addr, DB: testDB})
+	pool := newTestPool(t)
 
 	ctx := t.Context()
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		t.Skipf("redis not available at %s: %v", addr, err)
-	}
-	if err := rdb.FlushDB(ctx).Err(); err != nil {
-		t.Fatalf("FlushDB() error = %v", err)
-	}
-	t.Cleanup(func() {
-		if err := rdb.FlushDB(context.Background()).Err(); err != nil {
-			t.Errorf("FlushDB() cleanup error = %v", err)
-		}
-		if err := rdb.Close(); err != nil {
-			t.Errorf("Close() cleanup error = %v", err)
-		}
-	})
-
 	awsCfg, err := awsconfig.New(ctx)
 	if err != nil {
 		t.Fatalf("awsconfig.New() error = %v", err)
@@ -71,11 +52,11 @@ func newSQSTestServer(t *testing.T) *httptest.Server {
 		t.Fatalf("EnsureQueue(completions) error = %v", err)
 	}
 
-	jobStore := jobstore.New(rdb)
+	jobStore := pgjobstore.New(pool, testChannel)
 
 	resolver := &graph.Resolver{
 		JobStore:   jobStore,
-		Hub:        pubsub.New(rdb),
+		Hub:        newTestHub(t),
 		Dispatcher: sqsdispatch.New(sqsClient, requestsURL),
 	}
 

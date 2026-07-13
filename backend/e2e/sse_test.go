@@ -12,12 +12,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/redis/go-redis/v9"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/tkdn/gqlgen-subscription/backend/graph"
 	"github.com/tkdn/gqlgen-subscription/backend/graph/model"
-	"github.com/tkdn/gqlgen-subscription/backend/jobstore"
-	"github.com/tkdn/gqlgen-subscription/backend/pubsub"
+	"github.com/tkdn/gqlgen-subscription/backend/pgclient"
+	"github.com/tkdn/gqlgen-subscription/backend/pgjobstore"
+	"github.com/tkdn/gqlgen-subscription/backend/pgpubsub"
 )
 
 // noopDispatcher はgraph.JobDispatcherの何もしない実装。SQS投入自体を検証
@@ -29,40 +31,89 @@ func (noopDispatcher) Dispatch(ctx context.Context, userID string, job *model.Jo
 	return nil
 }
 
-// testDB は本番用(DB0)や他パッケージのテストと衝突しないよう、
-// このパッケージ専用のRedis DB番号を使う。
-const testDB = 13
+// testSchema は他パッケージのテストと衝突しないよう、このパッケージ専用の
+// PostgreSQLスキーマを使う（Redis版テストのDB番号分離に相当）。
+const testSchema = "e2e_test"
+
+// testChannel はNOTIFYチャンネル名。チャンネルはスキーマスコープではなく
+// DBグローバルのため、スキーマ分離とは別にパッケージ専用の名前で分離する。
+const testChannel = "job_updates_e2e_test"
+
+// setTestEnvDefaults はlibpq互換環境変数が未設定の場合に、docker-compose.yml
+// のpostgresサービスに合わせたデフォルトを設定する。設定済みの環境変数は
+// そのまま優先される。
+func setTestEnvDefaults(t *testing.T) {
+	t.Helper()
+	defaults := map[string]string{
+		"PGHOST":     "localhost",
+		"PGUSER":     "app",
+		"PGPASSWORD": "app",
+		"PGDATABASE": "app",
+		"PGSSLMODE":  "disable",
+	}
+	for k, v := range defaults {
+		if os.Getenv(k) == "" {
+			t.Setenv(k, v)
+		}
+	}
+}
+
+// newTestPool は起動しているPostgreSQLのテスト専用スキーマに接続し、
+// テスト開始時にjobsテーブルをTRUNCATEして独立性を保証する。
+// PostgreSQLが起動していなければスキップする。
+func newTestPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	setTestEnvDefaults(t)
+
+	cfg, err := pgxpool.ParseConfig("")
+	if err != nil {
+		t.Fatalf("ParseConfig() error = %v", err)
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = testSchema
+
+	ctx := t.Context()
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("NewWithConfig() error = %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("postgres not available: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "CREATE SCHEMA IF NOT EXISTS "+testSchema); err != nil {
+		t.Fatalf("CREATE SCHEMA error = %v", err)
+	}
+	if err := pgclient.EnsureSchema(ctx, pool); err != nil {
+		t.Fatalf("EnsureSchema() error = %v", err)
+	}
+	if _, err := pool.Exec(ctx, "TRUNCATE jobs"); err != nil {
+		t.Fatalf("TRUNCATE error = %v", err)
+	}
+	return pool
+}
+
+// newTestHub はtestChannelを購読するpgpubsub.Hubを生成する。
+func newTestHub(t *testing.T) *pgpubsub.Hub {
+	t.Helper()
+	hub, err := pgpubsub.New(t.Context(), func(ctx context.Context) (*pgx.Conn, error) {
+		return pgx.Connect(ctx, "")
+	}, testChannel)
+	if err != nil {
+		t.Fatalf("pgpubsub.New() error = %v", err)
+	}
+	t.Cleanup(hub.Close)
+	return hub
+}
 
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 
-	addr := os.Getenv("REDIS_ADDR")
-	if addr == "" {
-		addr = "localhost:6379"
-	}
-
-	rdb := redis.NewClient(&redis.Options{Addr: addr, DB: testDB})
-
-	ctx := t.Context()
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		t.Skipf("redis not available at %s: %v", addr, err)
-	}
-	if err := rdb.FlushDB(ctx).Err(); err != nil {
-		t.Fatalf("FlushDB() error = %v", err)
-	}
-
-	t.Cleanup(func() {
-		if err := rdb.FlushDB(context.Background()).Err(); err != nil {
-			t.Errorf("FlushDB() cleanup error = %v", err)
-		}
-		if err := rdb.Close(); err != nil {
-			t.Errorf("Close() cleanup error = %v", err)
-		}
-	})
+	pool := newTestPool(t)
 
 	resolver := &graph.Resolver{
-		JobStore:   jobstore.New(rdb),
-		Hub:        pubsub.New(rdb),
+		JobStore:   pgjobstore.New(pool, testChannel),
+		Hub:        newTestHub(t),
 		Dispatcher: noopDispatcher{},
 	}
 
