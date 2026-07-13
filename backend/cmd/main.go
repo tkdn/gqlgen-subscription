@@ -15,9 +15,9 @@ import (
 	"github.com/tkdn/gqlgen-subscription/backend/awsconfig"
 	"github.com/tkdn/gqlgen-subscription/backend/consumer"
 	"github.com/tkdn/gqlgen-subscription/backend/graph"
-	"github.com/tkdn/gqlgen-subscription/backend/jobstore"
-	"github.com/tkdn/gqlgen-subscription/backend/pubsub"
-	"github.com/tkdn/gqlgen-subscription/backend/redisclient"
+	"github.com/tkdn/gqlgen-subscription/backend/pgclient"
+	"github.com/tkdn/gqlgen-subscription/backend/pgjobstore"
+	"github.com/tkdn/gqlgen-subscription/backend/pgpubsub"
 	"github.com/tkdn/gqlgen-subscription/backend/sqsdispatch"
 )
 
@@ -33,11 +33,17 @@ func main() {
 		port = defaultPort
 	}
 
-	rdb := redisclient.New()
-	defer rdb.Close()
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	pool, err := pgclient.New(ctx)
+	if err != nil {
+		log.Fatalf("pg pool: %v", err)
+	}
+	defer pool.Close()
+	if err := pgclient.EnsureSchema(ctx, pool); err != nil {
+		log.Fatalf("ensure schema: %v", err)
+	}
 
 	awsCfg, err := awsconfig.New(ctx)
 	if err != nil {
@@ -54,11 +60,17 @@ func main() {
 		log.Fatalf("ensure queue %q: %v", completionsQueueName, err)
 	}
 
-	jobStore := jobstore.New(rdb)
+	jobStore := pgjobstore.New(pool, pgjobstore.UpdatesChannel)
+
+	hub, err := pgpubsub.New(ctx, pgclient.Connect, pgjobstore.UpdatesChannel)
+	if err != nil {
+		log.Fatalf("pg pubsub: %v", err)
+	}
+	defer hub.Close()
 
 	resolver := &graph.Resolver{
 		JobStore:   jobStore,
-		Hub:        pubsub.New(rdb),
+		Hub:        hub,
 		Dispatcher: sqsdispatch.New(sqsClient, requestsURL),
 	}
 
