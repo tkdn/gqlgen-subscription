@@ -1,0 +1,10 @@
+# すべてのvariableにデフォルトがあるため、tfvarsなしでもapplyできる。
+# 変更したい場合のみterraform.tfvarsとしてコピーして使う。
+
+# project            = "gqlgen-subscription"
+# vpc_cidr           = "10.0.0.0/16"
+# db_username        = "app"
+# db_name            = "app"
+# rds_engine_version = "17"
+# workersim_delay    = "3s"
+# image_tag          = "latest"

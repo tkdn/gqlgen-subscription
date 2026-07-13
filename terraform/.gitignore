@@ -1,0 +1,6 @@
+# プロバイダバイナリとローカルステート（.terraform.lock.hclはコミットする）
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+crash.log
