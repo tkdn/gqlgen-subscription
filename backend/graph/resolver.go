@@ -25,7 +25,8 @@ type JobStore interface {
 }
 
 // Hub はresolverが必要とするジョブ更新通知のfan-out層のインターフェース。
-// 実装は pubsub.Hub が満たす。単体テストではモックに差し替える。
+// 実装は pgpubsub.Hub（本番配線）と pubsub.Hub（Redisの参照実装）が満たす。
+// 単体テストではモックに差し替える。
 type Hub interface {
 	Subscribe(userID string) (ch <-chan struct{}, unsubscribe func(), err error)
 }

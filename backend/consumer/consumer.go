@@ -68,8 +68,10 @@ func Run(ctx context.Context, client *sqs.Client, store JobStatusUpdater, comple
 			}
 
 			if _, err := store.UpdateStatus(ctx, comp.UserID, comp.JobID, status); err != nil {
-				// 冪等性は今回未実装のため、削除せず可視性タイムアウト後の
-				// 再配信に任せる。
+				// エラー時はメッセージを削除せず、可視性タイムアウト後の再配信に
+				// 任せる。正常系での重複メッセージ耐性（終端状態からの遷移拒否）は
+				// JobStatusUpdater実装側の責務（pgjobstore.Storeは保証、
+				// jobstore.Storeは保証しない。graph.JobStoreのコメント参照）。
 				log.Printf("consumer: update status failed for job_id=%s, will redeliver: %v", comp.JobID, err)
 				continue
 			}
