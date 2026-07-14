@@ -20,9 +20,11 @@ type JobStatusUpdater interface {
 	UpdateStatus(ctx context.Context, userID, jobID string, status model.JobState) (*model.Job, error)
 }
 
-// completionMessage はworkersimが送信する完了メッセージのペイロード。
+// CompletionMessage はworkersimが送信する完了メッセージのペイロード。
 // nameは運ばれない（jobstore.Storeの実体キーがjob_idベースのため不要）。
-type completionMessage struct {
+// consumer.Runに加えてLambdaハンドラ(lambdahandler)も同じペイロードを
+// 解釈するためexportしている。
+type CompletionMessage struct {
 	UserID string `json:"user_id"`
 	JobID  string `json:"job_id"`
 	Status string `json:"status"`
@@ -53,7 +55,7 @@ func Run(ctx context.Context, client *sqs.Client, store JobStatusUpdater, comple
 		}
 
 		for _, msg := range out.Messages {
-			var comp completionMessage
+			var comp CompletionMessage
 			if err := json.Unmarshal([]byte(aws.ToString(msg.Body)), &comp); err != nil {
 				log.Printf("consumer: bad message, deleting: %v", err)
 				deleteMessage(ctx, client, completionsURL, msg.ReceiptHandle)

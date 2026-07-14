@@ -99,13 +99,7 @@ func runInBackground(t *testing.T, client *sqs.Client, store *jobstore.Store, qu
 	})
 }
 
-type completionMessage struct {
-	UserID string `json:"user_id"`
-	JobID  string `json:"job_id"`
-	Status string `json:"status"`
-}
-
-func sendCompletion(t *testing.T, client *sqs.Client, queueURL string, msg completionMessage) {
+func sendCompletion(t *testing.T, client *sqs.Client, queueURL string, msg consumer.CompletionMessage) {
 	t.Helper()
 
 	body, err := json.Marshal(msg)
@@ -132,7 +126,7 @@ func TestRunUpdatesJobStatusFromCompletionMessage(t *testing.T) {
 
 	runInBackground(t, client, store, queueURL)
 
-	sendCompletion(t, client, queueURL, completionMessage{
+	sendCompletion(t, client, queueURL, consumer.CompletionMessage{
 		UserID: userID, JobID: created.ID, Status: string(model.JobStateCompleted),
 	})
 
@@ -162,7 +156,7 @@ func TestRunDeletesMessageWithInvalidStatus(t *testing.T) {
 
 	runInBackground(t, client, store, queueURL)
 
-	sendCompletion(t, client, queueURL, completionMessage{
+	sendCompletion(t, client, queueURL, consumer.CompletionMessage{
 		UserID: userID, JobID: created.ID, Status: "NOT_A_REAL_STATUS",
 	})
 

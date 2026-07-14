@@ -7,6 +7,8 @@ package pgclient
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -40,9 +42,23 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS jobs_user_id_idx ON jobs (user_id);
 `
 
-// New は標準解決チェーンの設定で接続プールを生成する。
+// New は標準解決チェーンの設定で接続プールを生成する。プールの最大接続数は
+// PGPOOL_MAX_CONNS環境変数で上書きできる（未設定時はpgxpoolのデフォルトの
+// まま）。Lambdaのように同時実行数×プールサイズでDBの接続数上限を圧迫しうる
+// 環境で、プールを小さく制限するために使う。
 func New(ctx context.Context) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, "")
+	cfg, err := pgxpool.ParseConfig("")
+	if err != nil {
+		return nil, fmt.Errorf("pgclient: parse config: %w", err)
+	}
+	if v := os.Getenv("PGPOOL_MAX_CONNS"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("pgclient: parse PGPOOL_MAX_CONNS %q: %w", v, err)
+		}
+		cfg.MaxConns = int32(n)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("pgclient: new pool: %w", err)
 	}
