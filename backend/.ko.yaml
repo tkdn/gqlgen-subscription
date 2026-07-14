@@ -1,7 +1,7 @@
 # koのビルド設定。goモジュールルート(backend/)から実行する前提
 # （リポジトリルートにはgo.modがないためkoがimport pathを解決できない）:
 #
-#   KO_DOCKER_REPO=<ECRリポジトリURL> ko build --bare ./cmd/main
+#   KO_DOCKER_REPO=<ECRリポジトリURL> ko build --bare ./cmd
 #
 # --bareでKO_DOCKER_REPOをそのままイメージ名にする（デフォルトの
 # <repo>/<basename>-<md5>命名を避け、成果物ごとに専用ECRリポジトリへ
