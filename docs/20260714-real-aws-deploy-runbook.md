@@ -10,7 +10,9 @@
 
 ## 前提
 
-- ツール: `terraform` / `ko` / `aws` CLI / `docker`（ECRログインの資格情報保存に使う）
+- ツール: `terraform` / `ko` / `aws` CLI / `docker`（ECRログインの資格情報保存に使う）/
+  `session-manager-plugin`（手順5のECS Execに必要。brew/aquaにLinux版が
+  ないため、公式debを`dpkg-deb -x`で展開しバイナリをPATH上に置く）
 - 権限: SSOの権限セットが`PowerUserAccess`ベースの場合、そのままでは
   IAMロールが作成できずフルapplyが失敗する。権限セットへのインライン
   ポリシー追加が事前に必要（トラブルシューティングの`iam:CreateRole`の
