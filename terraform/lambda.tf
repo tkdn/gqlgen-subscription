@@ -17,9 +17,10 @@ resource "aws_lambda_function" "completion_handler" {
   timeout       = 30
   memory_size   = 256
 
-  # 同時実行数×PGPOOL_MAX_CONNS(2)がRDS(db.t4g.micro)の接続数上限を
-  # 圧迫しないよう制限する
-  reserved_concurrent_executions = 5
+  # 同時実行の制限はevent source mapping側のmaximum_concurrencyで行う。
+  # reserved_concurrent_executionsはアカウントの同時実行クォータ（この
+  # アカウントは10）から「非予約分を最低10残す」制約により1すら予約
+  # できないため使えない。
 
   # RDSアクセスのためVPCへアタッチする。SQS到達性は不要（ポーリングは
   # LambdaサービスのマネージドインフラがVPC外で行う）。
@@ -55,4 +56,10 @@ resource "aws_lambda_event_source_mapping" "completions" {
   batch_size = 1
   # 部分バッチ失敗レポート（lambdahandlerがBatchItemFailuresを返す前提）
   function_response_types = ["ReportBatchItemFailures"]
+
+  # 同時実行数×PGPOOL_MAX_CONNS(2)がRDS(db.t4g.micro)の接続数上限を
+  # 圧迫しないよう制限する（2はmaximum_concurrencyの最小値）
+  scaling_config {
+    maximum_concurrency = 2
+  }
 }
