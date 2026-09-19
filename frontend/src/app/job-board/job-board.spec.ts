@@ -1,77 +1,67 @@
-import { provideHttpClient, withFetch } from '@angular/common/http';
-import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
+import { ApolloTestingController, ApolloTestingModule } from 'apollo-angular/testing';
 import { render, screen } from '@testing-library/angular';
 import userEvent from '@testing-library/user-event';
-import { Subject } from 'rxjs';
 import { describe, expect, it } from 'vitest';
 
-import { GraphqlSubscriptionService } from '../graphql/graphql-subscription.service';
-import { Job } from '../models/job.model';
 import { JobBoard } from './job-board';
 
-async function renderJobBoard(jobs$: Subject<Job[]>) {
+async function renderJobBoard() {
   const result = await render(JobBoard, {
-    providers: [
-      provideHttpClient(withFetch()),
-      provideHttpClientTesting(),
-      {
-        provide: GraphqlSubscriptionService,
-        useValue: { jobStatuses: () => jobs$.asObservable() },
-      },
-    ],
+    imports: [ApolloTestingModule],
   });
   return {
     ...result,
-    httpMock: result.fixture.debugElement.injector.get(HttpTestingController),
+    controller: result.fixture.debugElement.injector.get(ApolloTestingController),
   };
 }
 
 describe('JobBoard', () => {
   it('renders jobs pushed through the subscription', async () => {
-    const jobs$ = new Subject<Job[]>();
-    await renderJobBoard(jobs$);
+    const { controller } = await renderJobBoard();
 
-    jobs$.next([{ id: 'job-id-1', name: 'job-1', status: 'PENDING' }]);
+    const op = controller.expectOne('JobStatuses');
+    op.flush({
+      data: { jobStatuses: [{ id: 'job-id-1', name: 'job-1', status: 'PENDING' }] },
+    });
 
     expect(await screen.findByText('job-1')).toBeTruthy();
     expect((screen.getByRole('button', { name: 'PENDING' }) as HTMLButtonElement).disabled).toBe(
-      true
+      true,
     );
+
+    controller.verify();
   });
 
   it('creates a job via the createJob mutation', async () => {
-    const jobs$ = new Subject<Job[]>();
-    const { httpMock } = await renderJobBoard(jobs$);
-    const user = userEvent.setup();
+    const { controller } = await renderJobBoard();
+    controller.expectOne('JobStatuses').flush({ data: { jobStatuses: [] } });
 
+    const user = userEvent.setup();
     await user.type(screen.getByPlaceholderText('job name'), 'job-2');
     await user.click(screen.getByRole('button', { name: 'Create Job' }));
 
-    const req = httpMock.expectOne('/query');
-    const body = req.request.body as { query: string; variables?: Record<string, unknown> };
-    expect(body.query).toContain('createJob');
-    expect(body.variables?.['name']).toBe('job-2');
+    const op = controller.expectOne('CreateJob');
+    expect(op.operation.variables['name']).toBe('job-2');
+    op.flush({ data: { createJob: { id: 'job-id-2', name: 'job-2', status: 'PENDING' } } });
 
-    req.flush({ data: { createJob: { id: 'job-id-2', name: 'job-2', status: 'PENDING' } } });
-    httpMock.verify();
+    controller.verify();
   });
 
   it('updates job status via the updateJobStatus mutation', async () => {
-    const jobs$ = new Subject<Job[]>();
-    const { httpMock } = await renderJobBoard(jobs$);
-    jobs$.next([{ id: 'job-id-1', name: 'job-1', status: 'PENDING' }]);
+    const { controller } = await renderJobBoard();
+    controller
+      .expectOne('JobStatuses')
+      .flush({ data: { jobStatuses: [{ id: 'job-id-1', name: 'job-1', status: 'PENDING' }] } });
     await screen.findByText('job-1');
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'COMPLETED' }));
 
-    const req = httpMock.expectOne('/query');
-    const body = req.request.body as { query: string; variables?: Record<string, unknown> };
-    expect(body.query).toContain('updateJobStatus');
-    expect(body.variables?.['id']).toBe('job-id-1');
-    expect(body.variables?.['status']).toBe('COMPLETED');
+    const op = controller.expectOne('UpdateJobStatus');
+    expect(op.operation.variables['id']).toBe('job-id-1');
+    expect(op.operation.variables['status']).toBe('COMPLETED');
+    op.flush({ data: { updateJobStatus: { id: 'job-id-1', name: 'job-1', status: 'COMPLETED' } } });
 
-    req.flush({ data: { updateJobStatus: { id: 'job-id-1', name: 'job-1', status: 'COMPLETED' } } });
-    httpMock.verify();
+    controller.verify();
   });
 });

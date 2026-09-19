@@ -1,11 +1,6 @@
 <section class="job-board">
   <form class="create-form" (submit)="$event.preventDefault(); createJob()">
-    <input
-      type="text"
-      name="jobName"
-      placeholder="job name"
-      [(ngModel)]="newJobName"
-    />
+    <input type="text" name="jobName" placeholder="job name" [(ngModel)]="newJobName" />
     <button type="submit">Create Job</button>
   </form>
 

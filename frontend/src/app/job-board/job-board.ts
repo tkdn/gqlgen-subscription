@@ -1,11 +1,40 @@
 import { AsyncPipe } from '@angular/common';
 import { Component, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { Observable } from 'rxjs';
+import { Apollo, gql } from 'apollo-angular';
+import { firstValueFrom, map, Observable } from 'rxjs';
 
-import { GraphqlClientService } from '../graphql/graphql-client.service';
-import { GraphqlSubscriptionService } from '../graphql/graphql-subscription.service';
 import { Job, JOB_STATES, JobState } from '../models/job.model';
+
+const CREATE_JOB_MUTATION = gql`
+  mutation CreateJob($name: String!) {
+    createJob(name: $name) {
+      id
+      name
+      status
+    }
+  }
+`;
+
+const UPDATE_JOB_STATUS_MUTATION = gql`
+  mutation UpdateJobStatus($id: ID!, $status: JobState!) {
+    updateJobStatus(id: $id, status: $status) {
+      id
+      name
+      status
+    }
+  }
+`;
+
+const JOB_STATUSES_SUBSCRIPTION = gql`
+  subscription JobStatuses {
+    jobStatuses {
+      id
+      name
+      status
+    }
+  }
+`;
 
 @Component({
   selector: 'app-job-board',
@@ -14,23 +43,36 @@ import { Job, JOB_STATES, JobState } from '../models/job.model';
   styleUrl: './job-board.css',
 })
 export class JobBoard {
-  private readonly graphqlClient = inject(GraphqlClientService);
-  private readonly graphqlSubscription = inject(GraphqlSubscriptionService);
+  private readonly apollo = inject(Apollo);
 
   protected readonly jobStates = JOB_STATES;
   protected readonly newJobName = signal('');
-  protected readonly jobs$: Observable<Job[]> = this.graphqlSubscription.jobStatuses();
+  protected readonly jobs$: Observable<Job[]> = this.apollo
+    .subscribe<{ jobStatuses: Job[] }>({ query: JOB_STATUSES_SUBSCRIPTION })
+    // result.error (GraphQL errors) is intentionally dropped here; UI error handling
+    // is out of scope until ErrorLink is introduced.
+    .pipe(map((result) => result.data?.jobStatuses ?? []));
 
   async createJob(): Promise<void> {
     const name = this.newJobName().trim();
     if (!name) {
       return;
     }
-    await this.graphqlClient.createJob(name);
+    await firstValueFrom(
+      this.apollo.mutate<{ createJob: Job }>({
+        mutation: CREATE_JOB_MUTATION,
+        variables: { name },
+      }),
+    );
     this.newJobName.set('');
   }
 
   async updateJobStatus(id: string, status: JobState): Promise<void> {
-    await this.graphqlClient.updateJobStatus(id, status);
+    await firstValueFrom(
+      this.apollo.mutate<{ updateJobStatus: Job }>({
+        mutation: UPDATE_JOB_STATUS_MUTATION,
+        variables: { id, status },
+      }),
+    );
   }
 }
