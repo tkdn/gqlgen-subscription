@@ -12,6 +12,7 @@ interface GraphQLResponse<T> {
 const JOBS_QUERY = `
   query Jobs {
     jobs {
+      id
       name
       status
     }
@@ -21,6 +22,7 @@ const JOBS_QUERY = `
 const CREATE_JOB_MUTATION = `
   mutation CreateJob($name: String!) {
     createJob(name: $name) {
+      id
       name
       status
     }
@@ -28,8 +30,9 @@ const CREATE_JOB_MUTATION = `
 `;
 
 const UPDATE_JOB_STATUS_MUTATION = `
-  mutation UpdateJobStatus($name: String!, $status: JobState!) {
-    updateJobStatus(name: $name, status: $status) {
+  mutation UpdateJobStatus($id: ID!, $status: JobState!) {
+    updateJobStatus(id: $id, status: $status) {
+      id
       name
       status
     }
@@ -50,9 +53,9 @@ export class GraphqlClientService {
     return result.createJob;
   }
 
-  async updateJobStatus(name: string, status: JobState): Promise<Job> {
+  async updateJobStatus(id: string, status: JobState): Promise<Job> {
     const result = await this.execute<{ updateJobStatus: Job }>(UPDATE_JOB_STATUS_MUTATION, {
-      name,
+      id,
       status,
     });
     return result.updateJobStatus;

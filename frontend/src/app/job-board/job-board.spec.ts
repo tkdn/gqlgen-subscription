@@ -31,7 +31,7 @@ describe('JobBoard', () => {
     const jobs$ = new Subject<Job[]>();
     await renderJobBoard(jobs$);
 
-    jobs$.next([{ name: 'job-1', status: 'PENDING' }]);
+    jobs$.next([{ id: 'job-id-1', name: 'job-1', status: 'PENDING' }]);
 
     expect(await screen.findByText('job-1')).toBeTruthy();
     expect((screen.getByRole('button', { name: 'PENDING' }) as HTMLButtonElement).disabled).toBe(
@@ -52,14 +52,14 @@ describe('JobBoard', () => {
     expect(body.query).toContain('createJob');
     expect(body.variables?.['name']).toBe('job-2');
 
-    req.flush({ data: { createJob: { name: 'job-2', status: 'PENDING' } } });
+    req.flush({ data: { createJob: { id: 'job-id-2', name: 'job-2', status: 'PENDING' } } });
     httpMock.verify();
   });
 
   it('updates job status via the updateJobStatus mutation', async () => {
     const jobs$ = new Subject<Job[]>();
     const { httpMock } = await renderJobBoard(jobs$);
-    jobs$.next([{ name: 'job-1', status: 'PENDING' }]);
+    jobs$.next([{ id: 'job-id-1', name: 'job-1', status: 'PENDING' }]);
     await screen.findByText('job-1');
 
     const user = userEvent.setup();
@@ -68,10 +68,10 @@ describe('JobBoard', () => {
     const req = httpMock.expectOne('/query');
     const body = req.request.body as { query: string; variables?: Record<string, unknown> };
     expect(body.query).toContain('updateJobStatus');
-    expect(body.variables?.['name']).toBe('job-1');
+    expect(body.variables?.['id']).toBe('job-id-1');
     expect(body.variables?.['status']).toBe('COMPLETED');
 
-    req.flush({ data: { updateJobStatus: { name: 'job-1', status: 'COMPLETED' } } });
+    req.flush({ data: { updateJobStatus: { id: 'job-id-1', name: 'job-1', status: 'COMPLETED' } } });
     httpMock.verify();
   });
 });
