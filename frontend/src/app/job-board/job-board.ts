@@ -49,6 +49,8 @@ export class JobBoard {
   protected readonly newJobName = signal('');
   protected readonly jobs$: Observable<Job[]> = this.apollo
     .subscribe<{ jobStatuses: Job[] }>({ query: JOB_STATUSES_SUBSCRIPTION })
+    // result.error (GraphQL errors) is intentionally dropped here; UI error handling
+    // is out of scope until ErrorLink is introduced.
     .pipe(map((result) => result.data?.jobStatuses ?? []));
 
   async createJob(): Promise<void> {
@@ -60,7 +62,7 @@ export class JobBoard {
       this.apollo.mutate<{ createJob: Job }>({
         mutation: CREATE_JOB_MUTATION,
         variables: { name },
-      })
+      }),
     );
     this.newJobName.set('');
   }
@@ -70,7 +72,7 @@ export class JobBoard {
       this.apollo.mutate<{ updateJobStatus: Job }>({
         mutation: UPDATE_JOB_STATUS_MUTATION,
         variables: { id, status },
-      })
+      }),
     );
   }
 }
