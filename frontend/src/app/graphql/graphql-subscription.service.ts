@@ -7,6 +7,7 @@ import { Job } from '../models/job.model';
 const JOB_STATUSES_SUBSCRIPTION = `
   subscription JobStatuses {
     jobStatuses {
+      id
       name
       status
     }

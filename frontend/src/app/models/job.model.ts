@@ -9,6 +9,7 @@ export const JOB_STATES: readonly JobState[] = [
 ];
 
 export interface Job {
+  id: string;
   name: string;
   status: JobState;
 }

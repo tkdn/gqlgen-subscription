@@ -19,7 +19,7 @@
             <button
               type="button"
               [disabled]="job.status === state"
-              (click)="updateJobStatus(job.name, state)"
+              (click)="updateJobStatus(job.id, state)"
             >
               {{ state }}
             </button>

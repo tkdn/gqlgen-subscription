@@ -30,7 +30,7 @@ export class JobBoard {
     this.newJobName.set('');
   }
 
-  async updateJobStatus(name: string, status: JobState): Promise<void> {
-    await this.graphqlClient.updateJobStatus(name, status);
+  async updateJobStatus(id: string, status: JobState): Promise<void> {
+    await this.graphqlClient.updateJobStatus(id, status);
   }
 }
