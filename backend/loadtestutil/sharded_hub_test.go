@@ -58,9 +58,6 @@ func TestShardedHub_OnlyDeliversToSubscribedUser(t *testing.T) {
 
 	// user-bはSubscribeしない。user-bへのNOTIFYがuser-aに届かないことを確認する。
 
-	// LISTEN確立を待つ簡易な猶予（本番品質の同期はしない、最小実装のため）。
-	time.Sleep(300 * time.Millisecond)
-
 	notifyConn, err := pgx.Connect(t.Context(), "")
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -85,5 +82,66 @@ func TestShardedHub_OnlyDeliversToSubscribedUser(t *testing.T) {
 
 	if got := listCallsForB.Load(); got != 0 {
 		t.Errorf("listCallsForB = %d, want 0 (user-b's notification must not reach user-a's process/subscription)", got)
+	}
+}
+
+func TestShardedHub_DispatchCallsListOnceForMultipleSubscribersOfSameUser(t *testing.T) {
+	setShardedHubTestEnvDefaults(t)
+
+	var listCalls atomic.Int64
+	listFunc := func(ctx context.Context, userID string) ([]*model.Job, error) {
+		listCalls.Add(1)
+		return []*model.Job{{ID: "job-1", Name: userID, Status: model.JobStatePending}}, nil
+	}
+
+	connect := func(ctx context.Context) (*pgx.Conn, error) {
+		return pgx.Connect(ctx, "")
+	}
+
+	hub := loadtestutil.NewShardedHub(t.Context(), connect, "sharded_dispatch_test_channel", listFunc)
+	t.Cleanup(hub.Close)
+
+	ch1, unsub1, err := hub.Subscribe("dispatch-test-user")
+	if err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	t.Cleanup(unsub1)
+
+	ch2, unsub2, err := hub.Subscribe("dispatch-test-user")
+	if err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	t.Cleanup(unsub2)
+
+	notifyConn, err := pgx.Connect(t.Context(), "")
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer notifyConn.Close(t.Context())
+
+	if _, err := notifyConn.Exec(t.Context(), "SELECT pg_notify('sharded_dispatch_test_channel_dispatch-test-user', 'dispatch-test-user')"); err != nil {
+		t.Fatalf("notify: %v", err)
+	}
+
+	select {
+	case jobs := <-ch1:
+		if len(jobs) != 1 || jobs[0].Name != "dispatch-test-user" {
+			t.Errorf("ch1 received %+v, want single job for dispatch-test-user", jobs)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ch1: timed out waiting for broadcast")
+	}
+
+	select {
+	case jobs := <-ch2:
+		if len(jobs) != 1 || jobs[0].Name != "dispatch-test-user" {
+			t.Errorf("ch2 received %+v, want single job for dispatch-test-user", jobs)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ch2: timed out waiting for broadcast")
+	}
+
+	if got := listCalls.Load(); got != 1 {
+		t.Errorf("listCalls = %d, want 1 (dispatch should call List once regardless of subscriber count within the same process)", got)
 	}
 }
