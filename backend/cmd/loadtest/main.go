@@ -190,6 +190,9 @@ func subscribeTab(ctx context.Context, baseURL, userID string, tabIndex int, cou
 			eventLine = ""
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("tab %d: scan error: %v", tabIndex, err)
+	}
 }
 
 func fetchStats(baseURL string) (*statsResponse, error) {
