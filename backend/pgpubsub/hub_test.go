@@ -3,6 +3,7 @@ package pgpubsub_test
 import (
 	"context"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,9 +36,19 @@ func setTestEnvDefaults(t *testing.T) {
 	}
 }
 
+// stubList はテスト用の固定ListFunc。
+// 呼び出し回数を数えつつ、userIDを含む1件の文字列を返す（呼び出し元がuserIDごとに結果を区別できるようにする）。
+// pgpubsubパッケージが特定のドメイン型を要求しないことを示すため、Tにstringを使う。
+func stubList(callCount *atomic.Int64) pgpubsub.ListFunc[string] {
+	return func(ctx context.Context, userID string) ([]string, error) {
+		callCount.Add(1)
+		return []string{userID}, nil
+	}
+}
+
 // newTestHub はHubと、pg_notify発行用の接続を返す。PostgreSQLが起動して
-// いなければスキップする。
-func newTestHub(t *testing.T) (*pgpubsub.Hub, *pgx.Conn) {
+// いなければスキップする。listにはstubList等、テストごとに用意したものを渡す。
+func newTestHub(t *testing.T, list pgpubsub.ListFunc[string]) (*pgpubsub.Hub[string], *pgx.Conn) {
 	t.Helper()
 	setTestEnvDefaults(t)
 	ctx := t.Context()
@@ -50,7 +61,7 @@ func newTestHub(t *testing.T) (*pgpubsub.Hub, *pgx.Conn) {
 
 	hub, err := pgpubsub.New(ctx, func(ctx context.Context) (*pgx.Conn, error) {
 		return pgx.Connect(ctx, "")
-	}, testChannel)
+	}, testChannel, list)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -66,16 +77,18 @@ func publish(t *testing.T, pub *pgx.Conn, userID string) {
 	}
 }
 
-func waitForNotification(t *testing.T, ch <-chan struct{}) {
+func waitForNotification(t *testing.T, ch <-chan []string) []string {
 	t.Helper()
 	select {
-	case <-ch:
+	case values := <-ch:
+		return values
 	case <-time.After(time.Second):
 		t.Fatal("expected a notification, got none within timeout")
+		return nil
 	}
 }
 
-func expectNoNotification(t *testing.T, ch <-chan struct{}) {
+func expectNoNotification(t *testing.T, ch <-chan []string) {
 	t.Helper()
 	select {
 	case <-ch:
@@ -85,7 +98,8 @@ func expectNoNotification(t *testing.T, ch <-chan struct{}) {
 }
 
 func TestHubDeliversNotificationOnPublish(t *testing.T) {
-	hub, pub := newTestHub(t)
+	var callCount atomic.Int64
+	hub, pub := newTestHub(t, stubList(&callCount))
 
 	ch, unsubscribe, err := hub.Subscribe("pgpubsub-test-user-a")
 	if err != nil {
@@ -99,7 +113,8 @@ func TestHubDeliversNotificationOnPublish(t *testing.T) {
 }
 
 func TestHubFansOutToMultipleSubscribers(t *testing.T) {
-	hub, pub := newTestHub(t)
+	var callCount atomic.Int64
+	hub, pub := newTestHub(t, stubList(&callCount))
 
 	ch1, unsub1, err := hub.Subscribe("pgpubsub-test-user-a")
 	if err != nil {
@@ -119,7 +134,8 @@ func TestHubFansOutToMultipleSubscribers(t *testing.T) {
 }
 
 func TestHubIsolatesNotificationsByUser(t *testing.T) {
-	hub, pub := newTestHub(t)
+	var callCount atomic.Int64
+	hub, pub := newTestHub(t, stubList(&callCount))
 
 	chA, unsubA, err := hub.Subscribe("pgpubsub-test-user-a")
 	if err != nil {
@@ -139,7 +155,8 @@ func TestHubIsolatesNotificationsByUser(t *testing.T) {
 }
 
 func TestHubStopsDeliveringAfterUnsubscribe(t *testing.T) {
-	hub, pub := newTestHub(t)
+	var callCount atomic.Int64
+	hub, pub := newTestHub(t, stubList(&callCount))
 
 	ch, unsubscribe, err := hub.Subscribe("pgpubsub-test-user-a")
 	if err != nil {
@@ -150,4 +167,35 @@ func TestHubStopsDeliveringAfterUnsubscribe(t *testing.T) {
 	publish(t, pub, "pgpubsub-test-user-a")
 
 	expectNoNotification(t, ch)
+}
+
+func TestHubDispatchCallsListOnceAndBroadcastsToAllSubscribers(t *testing.T) {
+	var callCount atomic.Int64
+	hub, pub := newTestHub(t, stubList(&callCount))
+
+	ch1, unsub1, err := hub.Subscribe("pgpubsub-test-user-c")
+	if err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	defer unsub1()
+	ch2, unsub2, err := hub.Subscribe("pgpubsub-test-user-c")
+	if err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	defer unsub2()
+
+	publish(t, pub, "pgpubsub-test-user-c")
+
+	values1 := waitForNotification(t, ch1)
+	if len(values1) != 1 || values1[0] != "pgpubsub-test-user-c" {
+		t.Errorf("ch1 received %+v, want single value for pgpubsub-test-user-c", values1)
+	}
+	values2 := waitForNotification(t, ch2)
+	if len(values2) != 1 || values2[0] != "pgpubsub-test-user-c" {
+		t.Errorf("ch2 received %+v, want single value for pgpubsub-test-user-c", values2)
+	}
+
+	if got := callCount.Load(); got != 1 {
+		t.Errorf("list call count = %d, want 1 (dispatch should call List once regardless of subscriber count)", got)
+	}
 }

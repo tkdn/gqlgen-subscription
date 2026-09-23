@@ -63,7 +63,7 @@ func main() {
 
 	countingJobStore := loadtestutil.NewCountingJobStore(pgjobstore.New(pool, pgjobstore.UpdatesChannel))
 
-	hub, err := pgpubsub.New(ctx, pgclient.Connect, pgjobstore.UpdatesChannel)
+	hub, err := pgpubsub.New(ctx, pgclient.Connect, pgjobstore.UpdatesChannel, countingJobStore.List)
 	if err != nil {
 		log.Fatalf("pg pubsub: %v", err)
 	}

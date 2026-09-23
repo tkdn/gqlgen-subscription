@@ -56,7 +56,7 @@ func newSQSTestServer(t *testing.T) *httptest.Server {
 
 	resolver := &graph.Resolver{
 		JobStore:   jobStore,
-		Hub:        newTestHub(t),
+		Hub:        newTestHub(t, pool),
 		Dispatcher: sqsdispatch.New(sqsClient, requestsURL),
 	}
 

@@ -8,7 +8,6 @@ package graph
 import (
 	"context"
 	"fmt"
-	"log"
 
 	"github.com/tkdn/gqlgen-subscription/backend/graph/model"
 	"github.com/tkdn/gqlgen-subscription/backend/userctx"
@@ -65,15 +64,9 @@ func (r *subscriptionResolver) JobStatuses(ctx context.Context) (<-chan []*model
 			select {
 			case <-ctx.Done():
 				return
-			case _, ok := <-notify:
+			case jobs, ok := <-notify:
 				if !ok {
 					return
-				}
-				jobs, err := r.JobStore.List(ctx, userID)
-				if err != nil {
-					// 検証目的のためログのみ出力し、既存の購読は継続する。
-					log.Printf("jobStatuses: list jobs for %q: %v", userID, err)
-					continue
 				}
 				select {
 				case ch <- jobs:

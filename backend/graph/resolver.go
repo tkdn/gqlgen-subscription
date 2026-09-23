@@ -25,10 +25,11 @@ type JobStore interface {
 }
 
 // Hub はresolverが必要とするジョブ更新通知のfan-out層のインターフェース。
-// 実装は pgpubsub.Hub（本番配線）と pubsub.Hub（Redisの参照実装）が満たす。
+// 実装は pgpubsub.Hub[*model.Job]（本番配線）が満たす。
 // 単体テストではモックに差し替える。
+// Subscribeの戻り値チャネルには、更新のたびに最新のジョブ一覧そのものが届く（dispatch側がuserIDあたり1回だけListを呼び、結果を全購読者に配るため）。
 type Hub interface {
-	Subscribe(userID string) (ch <-chan struct{}, unsubscribe func(), err error)
+	Subscribe(userID string) (ch <-chan []*model.Job, unsubscribe func(), err error)
 }
 
 // JobDispatcher はresolverが必要とする非同期ワーカーへのジョブ投入層の

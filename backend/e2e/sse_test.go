@@ -94,11 +94,12 @@ func newTestPool(t *testing.T) *pgxpool.Pool {
 }
 
 // newTestHub はtestChannelを購読するpgpubsub.Hubを生成する。
-func newTestHub(t *testing.T) *pgpubsub.Hub {
+func newTestHub(t *testing.T, pool *pgxpool.Pool) *pgpubsub.Hub[*model.Job] {
 	t.Helper()
+	store := pgjobstore.New(pool, testChannel)
 	hub, err := pgpubsub.New(t.Context(), func(ctx context.Context) (*pgx.Conn, error) {
 		return pgx.Connect(ctx, "")
-	}, testChannel)
+	}, testChannel, store.List)
 	if err != nil {
 		t.Fatalf("pgpubsub.New() error = %v", err)
 	}
@@ -110,10 +111,11 @@ func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 
 	pool := newTestPool(t)
+	jobStore := pgjobstore.New(pool, testChannel)
 
 	resolver := &graph.Resolver{
-		JobStore:   pgjobstore.New(pool, testChannel),
-		Hub:        newTestHub(t),
+		JobStore:   jobStore,
+		Hub:        newTestHub(t, pool),
 		Dispatcher: noopDispatcher{},
 	}
 

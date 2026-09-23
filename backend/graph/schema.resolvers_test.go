@@ -44,10 +44,10 @@ func (m *mockJobStore) List(ctx context.Context, userID string) ([]*model.Job, e
 
 // mockHub はgraph.Hubのテスト用実装。
 type mockHub struct {
-	subscribeFn func(userID string) (<-chan struct{}, func(), error)
+	subscribeFn func(userID string) (<-chan []*model.Job, func(), error)
 }
 
-func (m *mockHub) Subscribe(userID string) (<-chan struct{}, func(), error) {
+func (m *mockHub) Subscribe(userID string) (<-chan []*model.Job, func(), error) {
 	return m.subscribeFn(userID)
 }
 
@@ -202,7 +202,7 @@ func TestSubscriptionResolver_JobStatuses_DeliversInitialSnapshotAndUpdates(t *t
 	ctx, cancel := context.WithCancel(testContext(t))
 	defer cancel()
 
-	notify := make(chan struct{}, 1)
+	notify := make(chan []*model.Job, 1)
 	unsubscribeCalled := make(chan struct{}, 1)
 
 	store := &mockJobStore{
@@ -211,7 +211,7 @@ func TestSubscriptionResolver_JobStatuses_DeliversInitialSnapshotAndUpdates(t *t
 		},
 	}
 	hub := &mockHub{
-		subscribeFn: func(userID string) (<-chan struct{}, func(), error) {
+		subscribeFn: func(userID string) (<-chan []*model.Job, func(), error) {
 			return notify, func() { unsubscribeCalled <- struct{}{} }, nil
 		},
 	}
@@ -228,10 +228,10 @@ func TestSubscriptionResolver_JobStatuses_DeliversInitialSnapshotAndUpdates(t *t
 		t.Fatalf("initial snapshot = %+v, want single job-1", initial)
 	}
 
-	notify <- struct{}{}
+	notify <- []*model.Job{{Name: "job-1", Status: model.JobStateAnalyzing}}
 	updated := <-ch
-	if len(updated) != 1 || updated[0].Name != "job-1" {
-		t.Fatalf("updated snapshot = %+v, want single job-1", updated)
+	if len(updated) != 1 || updated[0].Name != "job-1" || updated[0].Status != model.JobStateAnalyzing {
+		t.Fatalf("updated snapshot = %+v, want single job-1 ANALYZING", updated)
 	}
 
 	cancel()
@@ -251,7 +251,7 @@ func TestSubscriptionResolver_JobStatuses_PropagatesSubscribeError(t *testing.T)
 	wantErr := errors.New("subscribe failed")
 
 	hub := &mockHub{
-		subscribeFn: func(userID string) (<-chan struct{}, func(), error) {
+		subscribeFn: func(userID string) (<-chan []*model.Job, func(), error) {
 			return nil, nil, wantErr
 		},
 	}
