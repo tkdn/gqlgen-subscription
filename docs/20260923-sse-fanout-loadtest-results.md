@@ -326,3 +326,147 @@ $ docker compose down
 ```
 
 **観察:** プロセスAのList呼び出し回数はタブ5本・更新3回の条件で8回だった。内訳は、`ShardedHub`のdispatch集約により更新1回につきタブ数に関わらずList呼び出しが1回に収束するため更新分3回、加えてsubscription確立直後の初期スナップショット取得（`schema.resolvers.go`の`JobStore.List`呼び出し、Hubを経由しない別経路であり本タスクの変更対象外）がタブ数分（5回）そのまま発生するため、3+5=8回という合計になった。これはタブ数5に依存しない値になっており、Task 10（タブ3×(1+2)=9回、タブ数に完全比例）との対比で、fix #1のdispatch集約効果がfix #2（userID単位チャンネル分割）と共存できることを裏付けている。また、プロセスBのList呼び出し回数は`{}`（0）のままであり、無関係プロセスへの配信が発生しないというfix #2の効果も同時に維持されていることを確認した。
+
+## 6. fix #2の識別力のある検証（NOTIFY受信件数カウンタ）
+
+Section 3で述べたとおり、「プロセスBの`List`呼び出し回数が0のまま」「プロセスBのログに`wait for notification`や`dispatch`が出現しない」という従来の証拠は、実は単一チャンネル方式（`pgpubsub.Hub`）とチャンネル分割方式（`ShardedHub`）のどちらでも成立し得るため、両者を区別する証拠になっていなかった。単一チャンネル方式でもプロセスBに購読者がいなければ`dispatch`は`List`を呼ばずに早期returnする。また両`Hub`実装とも、NOTIFY受信に成功した通常経路では何もログ出力しない（エラー時のみログを出す設計のため）。
+
+この区別を実際につけるため、`conn.WaitForNotification`が成功するたびに加算する`notificationsReceived`カウンタを`pgpubsub.Hub[T]`と`loadtestutil.ShardedHub[T]`の両方に追加し（`NotificationsReceived() int64`として公開）、`/debug/loadtest-stats`のJSONレスポンスに`notifications_received`として配線した。「NOTIFYを受信したが購読者がおらず何もしなかった」（単一チャンネル方式で想定される挙動）と「NOTIFY自体が届いていない」（チャンネル分割方式で想定される挙動）は、`notifications_received`の値であれば区別できる。
+
+条件: プロセスA（ポート8080）にuser向けのタブ1本を接続。プロセスB（ポート8081）はそのユーザーの接続を一切持たない。updateJobStatus 1回。コントロール（単一チャンネル、`LOADTEST_SHARDED_HUB`未設定）とシャーディング（`LOADTEST_SHARDED_HUB=true`）の両方で同じ手順を実行し、プロセスBの`notifications_received`を比較した。
+
+### 6.1 コントロール（単一チャンネル、`LOADTEST_SHARDED_HUB`未設定）
+
+起動コマンド:
+
+```
+$ docker compose up -d
+$ cd backend
+$ direnv exec . env PORT=8080 AWS_ENDPOINT_URL=http://localhost:14566 go run ./cmd > /tmp/loadtest-process-8080-control.log 2>&1 &
+$ direnv exec . env PORT=8081 AWS_ENDPOINT_URL=http://localhost:14566 go run ./cmd > /tmp/loadtest-process-8081-control.log 2>&1 &
+$ cat /tmp/loadtest-process-8080-control.log
+2026/09/23 22:01:22 connect to http://localhost:8080/ for GraphQL playground
+$ cat /tmp/loadtest-process-8081-control.log
+2026/09/23 22:01:28 connect to http://localhost:8081/ for GraphQL playground
+```
+
+プロセスAにのみ`control-user-a`のタブを1本接続し、updateJobStatusを1回発行:
+
+```
+$ direnv exec . go run ./cmd/loadtest -tabs=1 -processes=http://localhost:8080 -updates=1 -interval=2s -user=control-user-a
+2026/09/23 22:01:43 created job id=01a0ce5b-93ed-7d23-826f-c093abea5da1 on http://localhost:8080
+2026/09/23 22:01:43 [2026-09-23T22:01:43.297227067+09:00] タブ0 受信
+2026/09/23 22:01:43 [2026-09-23T22:01:43.794861431+09:00] fired updateJobStatus id=01a0ce5b-93ed-7d23-826f-c093abea5da1 status=ANALYZING
+2026/09/23 22:01:43 [2026-09-23T22:01:43.805893983+09:00] タブ0 受信
+2026/09/23 22:01:47 tab 0: scan error: context canceled
+
+=== 結果 ===
+タブ数: 1, 更新回数: 1, ユーザー: control-user-a
+
+--- 各タブの受信回数 ---
+タブ0 (接続先 http://localhost:8080): 2回受信
+
+--- 各プロセスのList呼び出し回数（累積） ---
+http://localhost:8080: map[control-user-a:2]
+```
+
+両プロセスの`/debug/loadtest-stats`:
+
+```
+$ curl -s http://localhost:8080/debug/loadtest-stats
+{"list_call_counts_by_user":{"control-user-a":2},"notifications_received":2}
+
+$ curl -s http://localhost:8081/debug/loadtest-stats
+{"list_call_counts_by_user":{},"notifications_received":2}
+```
+
+プロセスBのログとgrep結果（従来の「証拠」を再現）:
+
+```
+$ cat /tmp/loadtest-process-8081-control.log
+2026/09/23 22:01:28 connect to http://localhost:8081/ for GraphQL playground
+
+$ grep -i "wait for notification\|dispatch\|error\|panic" /tmp/loadtest-process-8081-control.log
+（一致行なし）
+```
+
+**観察:** プロセスBの`list_call_counts_by_user`は`{}`のまま、ログにも何も出力されない——従来の「証拠」はSection 3と同じ見え方になる。しかし`notifications_received`を見ると、プロセスBは**2**を記録している（プロセスAの`List`呼び出し回数2＝初期スナップショット1回+更新1回、と一致する回数）。つまりプロセスBは単一`job_updates`チャンネルをLISTENしているため、`control-user-a`宛のNOTIFYを2回とも実際に受信しており、`dispatch`内で購読者がいないため`List`を呼ばずに捨てていただけだった。「Bの`List`呼び出し0回」と「Bのログに出力がない」は、この単一チャンネル方式でも成立する現象であり、従来の証拠がチャンネル分割方式と区別できていなかったことが実測で裏付けられた。
+
+### 6.2 シャーディング（`LOADTEST_SHARDED_HUB=true`）
+
+起動コマンド:
+
+```
+$ direnv exec . env PORT=8080 LOADTEST_SHARDED_HUB=true AWS_ENDPOINT_URL=http://localhost:14566 go run ./cmd > /tmp/loadtest-process-8080-sharded-notif.log 2>&1 &
+$ direnv exec . env PORT=8081 LOADTEST_SHARDED_HUB=true AWS_ENDPOINT_URL=http://localhost:14566 go run ./cmd > /tmp/loadtest-process-8081-sharded-notif.log 2>&1 &
+$ cat /tmp/loadtest-process-8080-sharded-notif.log
+2026/09/23 22:02:14 loadtest: using ShardedHub (userID単位のNOTIFYチャンネル分割)
+2026/09/23 22:02:14 connect to http://localhost:8080/ for GraphQL playground
+$ cat /tmp/loadtest-process-8081-sharded-notif.log
+2026/09/23 22:02:20 loadtest: using ShardedHub (userID単位のNOTIFYチャンネル分割)
+2026/09/23 22:02:20 connect to http://localhost:8081/ for GraphQL playground
+```
+
+プロセスAにのみ`sharded-user-a`のタブを1本接続し、updateJobStatusを1回発行:
+
+```
+$ direnv exec . go run ./cmd/loadtest -tabs=1 -processes=http://localhost:8080 -updates=1 -interval=2s -user=sharded-user-a
+2026/09/23 22:02:33 created job id=01a0ce5c-56c2-75a2-b66b-7518cdb06a48 on http://localhost:8080
+2026/09/23 22:02:33 [2026-09-23T22:02:33.181083098+09:00] タブ0 受信
+2026/09/23 22:02:33 [2026-09-23T22:02:33.667614692+09:00] fired updateJobStatus id=01a0ce5c-56c2-75a2-b66b-7518cdb06a48 status=ANALYZING
+2026/09/23 22:02:33 [2026-09-23T22:02:33.68547937+09:00] タブ0 受信
+2026/09/23 22:02:37 tab 0: scan error: context canceled
+
+=== 結果 ===
+タブ数: 1, 更新回数: 1, ユーザー: sharded-user-a
+
+--- 各タブの受信回数 ---
+タブ0 (接続先 http://localhost:8080): 2回受信
+
+--- 各プロセスのList呼び出し回数（累積） ---
+http://localhost:8080: map[sharded-user-a:2]
+```
+
+両プロセスの`/debug/loadtest-stats`:
+
+```
+$ curl -s http://localhost:8080/debug/loadtest-stats
+{"list_call_counts_by_user":{"sharded-user-a":2},"notifications_received":1}
+
+$ curl -s http://localhost:8081/debug/loadtest-stats
+{"list_call_counts_by_user":{},"notifications_received":0}
+```
+
+プロセスBのログとgrep結果:
+
+```
+$ cat /tmp/loadtest-process-8081-sharded-notif.log
+2026/09/23 22:02:20 loadtest: using ShardedHub (userID単位のNOTIFYチャンネル分割)
+2026/09/23 22:02:20 connect to http://localhost:8081/ for GraphQL playground
+
+$ grep -i "wait for notification\|dispatch\|error\|panic" /tmp/loadtest-process-8081-sharded-notif.log
+（一致行なし）
+```
+
+後片付け:
+
+```
+$ lsof -ti :8080 :8081 | xargs -r kill
+$ docker compose down
+```
+
+**観察:** プロセスBの`notifications_received`は**0**だった。コントロール（6.1、B=2）とシャーディング（6.2、B=0）を並べると、`List`呼び出し回数やログの有無では区別できなかった「NOTIFY自体が届いたか」が、このカウンタでは明確に区別できている。単一チャンネル方式ではプロセスBも`job_updates`チャンネルをLISTENしているため無関係なユーザー宛のNOTIFYも受信するが、単に購読者がいないため`dispatch`が`List`を呼ばずに捨てる。チャンネル分割方式ではプロセスBがそもそも`sharded-user-a`用のチャンネル（`job_updates_sharded_sharded-user-a`）をLISTENしていないため、NOTIFY自体が配送されない。これがfix #2（チャンネルのuserID単位分割）が「無関係なプロセスへの配信自体をなくす」ことの、決定的な実測による裏付けである。
+
+なお、プロセスA自身の`notifications_received`はコントロールで2、シャーディングで1になっている。これは`pgjobstore.Store.notify`（`backend/pgjobstore/store.go`）が`Create`と`UpdateStatus`の両方でNOTIFYを発行する実装であることに由来する（`loadtest`クライアントはジョブ作成のため最初に`createJob`を1回呼んでおり、その後に`updateJobStatus`を1回発行しているため、NOTIFY自体は合計2回発生している）。コントロール（単一チャンネル）ではプロセスAのLISTEN接続がHub生成時点から確立済みのため、`Create`分・`UpdateStatus`分の両方のNOTIFYを受信し2回になる。一方シャーディングでは、userID専用チャンネルのLISTENは該当userIDへの最初の`Subscribe`呼び出し時に遅延生成される。`loadtest`クライアントは`createJob`を呼んだ「あと」でタブ（`Subscribe`）を張る順序のため、`Create`分のNOTIFYが発行された時点ではまだプロセスAはそのuserID専用チャンネルをLISTENしておらず、これを取りこぼす。その後`Subscribe`が完了してから発行される`UpdateStatus`分のNOTIFYだけを受信するため、Aは1回になる。この差はfix #2の設計そのものとは無関係な計測条件（クライアントの呼び出し順序）に起因するものであり、B側の「コントロール2・シャーディング0」という対比（今回の検証目的）の正しさには影響しない。
+
+## 7. まとめ
+
+これまでの計測結果を時系列・論理順に並べると次のようになる。
+
+- **ベースライン（改善前、単一プロセス、タブ5本、更新3回）**: List呼び出し20回。タブ数 × (初期スナップショット1回+更新3回) = 5 × 4 = 20回というN倍化が実測された（Section 1）。
+- **fix #1適用後（dispatch時1回List化、単一プロセス、タブ5本、更新3回）**: List呼び出し8回。更新3回分は`pgpubsub.Hub.dispatch`のdispatch集約により1回化されたが、初期スナップショット5回分（タブ数分そのまま）はdispatchを経由しない別経路のため削減されず残った。8 = 更新3（集約済み）+ 初期スナップショット5（未集約）（Section 2）。
+- **fix #2単体（チャンネルのuserID単位分割のみ、Task 12のdispatch集約移植より前、2プロセス、タブ3本、更新2回）**: プロセスAのList呼び出しは9回。この時点の`ShardedHub`はfix #1のdispatch集約ロジックをまだ持たず、`Subscribe`ごとに独立して`List`を呼ぶ実装だったため、初期スナップショット3回（タブ数分）+更新分6回（タブ数分、未集約）=9回であり、更新分もタブ数に比例したまま残っていた。**fix #2はfix #1の効果を自動的には継承しない**ことを示す実測結果である。一方プロセスBのList呼び出しは0回で、無関係プロセスへの配信を防ぐ効果自体は確認できた（Section 3）。
+- **fix #1+fix #2 組み合わせ（Task 12でShardedHubにdispatch集約ロジックを移植、2プロセス、タブ5本、更新3回）**: プロセスAのList呼び出しは8回（更新3回分は集約済み、初期スナップショット5回分は未集約のまま）、プロセスBは0回。これはfix #1単体（Section 2）と同じ内訳構造であり、dispatch集約の効果がチャンネル分割設計にも正しく移植されたことを示す（Section 5）。
+- **fix #2の識別力のある検証（NOTIFY受信件数カウンタ、2プロセス、タブ1本、更新1回）**: 単一チャンネル方式のコントロールではプロセスBの`notifications_received`が2（無関係なユーザー宛のNOTIFYも受信していたが、購読者がいないため`List`は呼ばれなかった）、チャンネル分割方式ではプロセスBの`notifications_received`が0（そもそもNOTIFY自体が配送されない）。この対比により、「無関係なプロセスへの配信自体をなくす」というfix #2の効果を、List呼び出し回数やログの有無に頼らない形で直接示すことができた（Section 6）。
+
+[docs/20260919-sse-fanout-load-analysis.md](./20260919-sse-fanout-load-analysis.md)で立てた仮説は、「fix #1（dispatch時1回化）は同一プロセス内での冗長なList呼び出しを減らす」「fix #2（チャンネル分割）は無関係なプロセスへのNOTIFY配送自体をなくす」という、役割の異なる独立した改善であるというものだった。今回の一連の実測はこれを裏付けている。重要なのは、この2つの改善が実装上も独立していたという点である。fix #2単体の計測（Section 3）が示すとおり、`ShardedHub`はfix #1のdispatch集約ロジックを自動的には継承せず、Task 12で明示的に移植するまでは「チャンネルは分割されているが、同一プロセス内でのタブ数比例の重複List呼び出しは残ったまま」という状態だった。両者は測定対象のレイヤーが異なる（fix #1は「同一プロセス内でのList呼び出し回数」、fix #2は「プロセス間のNOTIFY到達範囲」）ため、一方の実装が他方の効果を保証しない。組み合わせて初めて、タブ数・プロセス数の両方に対してスケールする構造になる、という仮説が実測で確認された。
