@@ -63,15 +63,30 @@ func main() {
 
 	countingJobStore := loadtestutil.NewCountingJobStore(pgjobstore.New(pool, pgjobstore.UpdatesChannel))
 
-	hub, err := pgpubsub.New(ctx, pgclient.Connect, pgjobstore.UpdatesChannel, countingJobStore.List)
-	if err != nil {
-		log.Fatalf("pg pubsub: %v", err)
+	var (
+		resolverJobStore graph.JobStore = countingJobStore
+		resolverHub      graph.Hub
+	)
+
+	if os.Getenv("LOADTEST_SHARDED_HUB") == "true" {
+		shardedNotifyStore := loadtestutil.NewShardedNotifyJobStore(countingJobStore, pool, "job_updates_sharded")
+		resolverJobStore = shardedNotifyStore
+		shardedHub := loadtestutil.NewShardedHub(ctx, pgclient.Connect, "job_updates_sharded", shardedNotifyStore.List)
+		defer shardedHub.Close()
+		resolverHub = shardedHub
+		log.Println("loadtest: using ShardedHub (userID単位のNOTIFYチャンネル分割)")
+	} else {
+		hub, err := pgpubsub.New(ctx, pgclient.Connect, pgjobstore.UpdatesChannel, countingJobStore.List)
+		if err != nil {
+			log.Fatalf("pg pubsub: %v", err)
+		}
+		defer hub.Close()
+		resolverHub = hub
 	}
-	defer hub.Close()
 
 	resolver := &graph.Resolver{
-		JobStore:   countingJobStore,
-		Hub:        hub,
+		JobStore:   resolverJobStore,
+		Hub:        resolverHub,
 		Dispatcher: sqsdispatch.New(sqsClient, requestsURL),
 	}
 
