@@ -175,3 +175,67 @@ connect to http://localhost:8081/ for GraphQL playground
 - fix #2適用後（チャンネルのuserID単位分割、2プロセス、user-shard-aのタブはプロセスAにのみ3本）: プロセスAのList呼び出しは9回（fix #1と同じ構造）、プロセスBのList呼び出しは0回（NOTIFY自体が配送されない）
 
 [docs/20260919-sse-fanout-load-analysis.md](./20260919-sse-fanout-load-analysis.md)で立てた仮説は、「fix #1（dispatch時1回化）は同一プロセス内での冗長なList呼び出しを減らす」「fix #2（チャンネル分割）は無関係なプロセスへのNOTIFY配送自体をなくす」という、役割の異なる独立した改善であるというものだった。今回の実測はこれを裏付けている。fix #1はプロセスAの内訳（9回 = タブ3 × (初期スナップショット1 + 更新2)）が示すとおり、初期スナップショット分は削減の対象外のまま残り、更新分だけが1回化される。fix #2はList呼び出し回数そのものではなく、無関係なプロセス（B）へのNOTIFY到達の有無に効く。両者は測定対象のレイヤーが異なるため（fix #1は「同一プロセス内でのList呼び出し回数」、fix #2は「プロセス間のNOTIFY到達範囲」）、片方だけでは他方の問題を解決できず、組み合わせて初めてタブ数・プロセス数双方に対してスケールする構造になる、という仮説が実測で確認された。
+
+## 4. 改善前後の接続関係
+
+### 4.1 改善前（単一チャンネル、dispatch時に購読者数分List）
+
+```mermaid
+sequenceDiagram
+    participant TabA as ブラウザ タブA
+    participant TabB as ブラウザ タブB
+    participant Resolver as JobStatusesリゾルバ
+    participant Hub as pgpubsub.Hub
+    participant PG as PostgreSQL
+
+    TabA->>Resolver: subscription jobStatuses
+    Resolver->>Hub: Subscribe(userID)
+    Hub-->>Resolver: triggerChA登録
+    TabB->>Resolver: subscription jobStatuses
+    Resolver->>Hub: Subscribe(userID)
+    Hub-->>Resolver: triggerChB登録
+
+    Note over PG: updateJobStatus実行、COMMIT
+    PG-->>Hub: NOTIFY job_updates userID
+    Hub->>Hub: subs[userID]のtriggerCh全件へ非ブロッキング送信
+    Hub-->>Resolver: triggerChAに合図
+    Hub-->>Resolver: triggerChBに合図
+    Resolver->>PG: SELECT ... FROM jobs WHERE user_id (タブA分)
+    PG-->>Resolver: jobs
+    Resolver-->>TabA: jobs
+    Resolver->>PG: SELECT ... FROM jobs WHERE user_id (タブB分)
+    PG-->>Resolver: jobs
+    Resolver-->>TabB: jobs
+```
+
+タブの本数だけ`SELECT ... FROM jobs WHERE user_id`が発行される。
+
+### 4.2 改善後（dispatch時1回List、userID単位チャンネル分割）
+
+```mermaid
+sequenceDiagram
+    participant TabA as ブラウザ タブA
+    participant TabB as ブラウザ タブB
+    participant Resolver as JobStatusesリゾルバ
+    participant Hub as pgpubsub.Hub
+    participant PG as PostgreSQL
+
+    TabA->>Resolver: subscription jobStatuses
+    Resolver->>Hub: Subscribe(userID)
+    Hub-->>Resolver: dataChA登録
+    TabB->>Resolver: subscription jobStatuses
+    Resolver->>Hub: Subscribe(userID)
+    Hub-->>Resolver: dataChB登録
+
+    Note over PG: updateJobStatus実行、COMMIT
+    PG-->>Hub: NOTIFY job_updates_userID
+    Hub->>PG: SELECT ... FROM jobs WHERE user_id（1回のみ）
+    PG-->>Hub: jobs
+    Hub->>Hub: subs[userID]の全dataChへ同じjobsを送信
+    Hub-->>Resolver: dataChAにjobs
+    Resolver-->>TabA: jobs
+    Hub-->>Resolver: dataChBにjobs
+    Resolver-->>TabB: jobs
+```
+
+タブの本数に関わらず、1回の更新につき`SELECT ... FROM jobs WHERE user_id`は1回だけ発行される。チャンネルをuserID単位に分割しているため、無関係なユーザー宛のNOTIFYはこのプロセスに一切届かない。
