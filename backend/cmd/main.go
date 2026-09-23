@@ -66,6 +66,7 @@ func main() {
 	var (
 		resolverJobStore graph.JobStore = countingJobStore
 		resolverHub      graph.Hub
+		notifyCounter    loadtestutil.NotificationCounter
 	)
 
 	if os.Getenv("LOADTEST_SHARDED_HUB") == "true" {
@@ -74,6 +75,7 @@ func main() {
 		shardedHub := loadtestutil.NewShardedHub(ctx, pgclient.Connect, "job_updates_sharded", shardedNotifyStore.List)
 		defer shardedHub.Close()
 		resolverHub = shardedHub
+		notifyCounter = shardedHub
 		log.Println("loadtest: using ShardedHub (userID単位のNOTIFYチャンネル分割)")
 	} else {
 		hub, err := pgpubsub.New(ctx, pgclient.Connect, pgjobstore.UpdatesChannel, countingJobStore.List)
@@ -82,6 +84,7 @@ func main() {
 		}
 		defer hub.Close()
 		resolverHub = hub
+		notifyCounter = hub
 	}
 
 	resolver := &graph.Resolver{
@@ -93,7 +96,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/", playground.Handler("GraphQL playground", "/query"))
 	mux.Handle("/query", graph.NewHandler(resolver))
-	mux.Handle("/debug/loadtest-stats", loadtestutil.NewStatsHandler(countingJobStore))
+	mux.Handle("/debug/loadtest-stats", loadtestutil.NewStatsHandler(countingJobStore, notifyCounter))
 
 	httpServer := &http.Server{
 		Addr:    ":" + port,

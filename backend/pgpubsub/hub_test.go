@@ -199,3 +199,38 @@ func TestHubDispatchCallsListOnceAndBroadcastsToAllSubscribers(t *testing.T) {
 		t.Errorf("list call count = %d, want 1 (dispatch should call List once regardless of subscriber count)", got)
 	}
 }
+
+func TestHubNotificationsReceivedCountsEveryNotifyRegardlessOfSubscribers(t *testing.T) {
+	var callCount atomic.Int64
+	hub, pub := newTestHub(t, stubList(&callCount))
+
+	// 購読者なしでNOTIFYを発行する。dispatchはlistを呼ばないが、
+	// NotificationsReceivedはWaitForNotification成功のたびに加算されるべき。
+	publish(t, pub, "pgpubsub-test-user-no-subscriber")
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if hub.NotificationsReceived() >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := hub.NotificationsReceived(); got < 1 {
+		t.Fatalf("NotificationsReceived() = %d, want >= 1 even with no subscribers", got)
+	}
+
+	before := hub.NotificationsReceived()
+
+	ch, unsubscribe, err := hub.Subscribe("pgpubsub-test-user-d")
+	if err != nil {
+		t.Fatalf("Subscribe() error = %v", err)
+	}
+	defer unsubscribe()
+
+	publish(t, pub, "pgpubsub-test-user-d")
+	waitForNotification(t, ch)
+
+	if got := hub.NotificationsReceived(); got != before+1 {
+		t.Errorf("NotificationsReceived() = %d, want %d", got, before+1)
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -35,6 +36,8 @@ type Hub[T any] struct {
 
 	mu   sync.Mutex
 	subs map[string]map[chan []T]struct{}
+
+	notificationsReceived atomic.Int64
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -132,8 +135,17 @@ func (h *Hub[T]) run(ctx context.Context, conn *pgx.Conn) {
 			}
 			continue
 		}
+		h.notificationsReceived.Add(1)
 		h.dispatch(ctx, notification.Payload)
 	}
+}
+
+// NotificationsReceived はこのプロセスのLISTEN接続がNOTIFYを受信した累積回数を返す。
+// 購読者の有無やペイロードのuserIDに関わらず、WaitForNotificationが成功するたびに加算される。
+// 「NOTIFY自体が届いたが購読者がいなかった」ケースと「そもそもNOTIFYが届かなかった」ケースを
+// 区別するための計測用カウンタ。
+func (h *Hub[T]) NotificationsReceived() int64 {
+	return h.notificationsReceived.Load()
 }
 
 // reconnect は接続と再LISTENに成功するまでreconnectIntervalごとに試み続ける。

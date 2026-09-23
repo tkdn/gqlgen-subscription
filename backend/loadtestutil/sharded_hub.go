@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -37,6 +38,8 @@ type ShardedHub[T any] struct {
 
 	mu       sync.Mutex
 	channels map[string]*shardedChannel[T]
+
+	notificationsReceived atomic.Int64
 }
 
 // NewShardedHub はShardedHubを生成する。実際のLISTENはそのuserIDへの最初の
@@ -143,6 +146,7 @@ func (h *ShardedHub[T]) startListening(userID string, sc *shardedChannel[T]) err
 				log.Printf("loadtestutil: sharded hub wait for notification (%s): %v", channel, err)
 				return
 			}
+			h.notificationsReceived.Add(1)
 			h.dispatch(ctx, userID, sc)
 		}
 	}()
@@ -176,6 +180,15 @@ func (h *ShardedHub[T]) dispatch(ctx context.Context, userID string, sc *sharded
 		default:
 		}
 	}
+}
+
+// NotificationsReceived はこのプロセスが保持する全userID分のLISTEN接続が
+// NOTIFYを受信した累積回数を返す。購読者の有無に関わらず、いずれかの
+// userID専用チャンネルでWaitForNotificationが成功するたびに加算される。
+// 「NOTIFY自体が届いたが購読者がいなかった」ケースと「そもそもNOTIFYが
+// 届かなかった」ケースを区別するための計測用カウンタ。
+func (h *ShardedHub[T]) NotificationsReceived() int64 {
+	return h.notificationsReceived.Load()
 }
 
 // Close は全userIDのLISTEN接続をクローズする。
