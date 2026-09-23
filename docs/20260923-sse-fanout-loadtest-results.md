@@ -99,6 +99,8 @@ http://localhost:8080: map[loadtest-user-1790157151394593316:8]
 
 条件: プロセスA（ポート8080）にuser-shard-aのタブ3本を接続。プロセスB（ポート8081）はuser-shard-aの接続を一切持たない。updateJobStatus 2回。`LOADTEST_SHARDED_HUB=true`でプロセスA・Bともに起動し、`loadtestutil.ShardedNotifyJobStore`（`job_updates_sharded_<userID>`チャンネルへのNOTIFY）と`loadtestutil.ShardedHub`（同チャンネルのLISTEN）を配線した。
 
+**留意点（配線の制約）:** `LOADTEST_SHARDED_HUB=true`の配線では、resolverの`JobStore`（`updateJobStatus`ミューテーション経由の直接更新）だけが`shardedNotifyStore`に差し替えられている。`backend/cmd/main.go`の非同期ワーカー完了経路（`consumer.Run`）は`countingJobStore`（従来の単一`job_updates`チャンネルへのNOTIFYのみ行う実装）のまま配線されており、rewireされていない。そのため、sharded modeであってもワーカー経由の完了通知（workersim/consumer経由）はSSEクライアントに届かない構成になっている。今回の実験ではsharded modeの計測時にworkersim/consumerを一切使わず、`updateJobStatus`ミューテーションのみで更新を発生させているため、この配線ギャップは今回のどの計測結果にも影響していない。ただし本番相当の構成に持ち込む場合は、`consumer`側の通知先も`shardedNotifyStore`相当に揃える必要がある未解決の課題として残る。
+
 起動コマンド（プロセスA、ポート8080）:
 
 ```
@@ -161,20 +163,10 @@ connect to http://localhost:8081/ for GraphQL playground
 
 `grep -i "wait for notification\|dispatch" /tmp/loadtest-process-8081-sharded.log`の結果: 一致行なし。`grep -i "error\|panic"`の結果も一致行なし。
 
-- プロセスAのList呼び出し回数: `user-shard-a`: 9回（タブ3本 × (初期スナップショット1回 + 更新2回) = 3 × 3 = 9回。Task 8で確認した「更新1回あたり1回化」と「初期スナップショットはタブ数分」の両方の性質がここでも一致している）
+- プロセスAのList呼び出し回数: `user-shard-a`: 9回。この時点（Task 10）の`ShardedHub`はまだTask 12のdispatch集約ロジックを持っておらず、`Subscribe`呼び出しごとに独立して`List`が呼ばれる実装だった。そのため内訳は「初期スナップショット: タブ3本 × 1回 = 3回」+「更新2回分: タブ3本 × 2回 = 6回」で3+6=9回であり、初期スナップショットだけでなく更新分もタブ数に比例したまま残っている。これはfix #1（dispatch時1回化）の効果を全く継承していないことを示す。「タブ3 × (初期スナップショット1 + 更新2) = 3 × 3 = 9」という式は一見同じ9という数字になるが、これは更新分がタブ数倍のまま9に達している式であり、fix #1適用後の「更新分は1回に集約され、初期スナップショット分だけがタブ数に比例する」という構造（Section 2の8回=更新3(集約済み)+初期スナップショット5）とは全く異なる。チャンネル分割（fix #2）とdispatch集約（fix #1）は独立した性質であり、`ShardedHub`が前者を実現しても後者を自動的には継承しないことを、この9回という実測値が示している。
 - プロセスBのList呼び出し回数: `user-shard-a`: 記録なし（`/debug/loadtest-stats`が`{}`のまま） — 期待どおり0回
 
-**観察:** プロセスBの`/debug/loadtest-stats`が`{}`のまま変化しないことから、userID単位のチャンネル分割により、無関係なプロセスへの配信自体が発生しないことを確認した。プロセスBのログにも`ShardedHub`のNOTIFY待受やdispatch関連の出力が一切現れず、エラーも出ていない。これは単一チャンネル方式（Task 1〜8）との違いを示す直接的な実測結果である。単一チャンネル方式では全プロセスが同じチャンネルをLISTENするため、プロセスBも`job_updates`チャンネルのNOTIFY自体は受信し、`dispatch`内でuserIDが一致せず捨てられる（＝Bの`List`呼び出し回数は増えないが、NOTIFY自体はBのプロセスに配送される）。`ShardedHub`方式ではプロセスBがそもそも`job_updates_sharded_user-shard-a`チャンネルをLISTENしていないため、NOTIFY自体が配送されない。`/debug/loadtest-stats`のList呼び出し回数だけでは両者を区別できないが、今回はプロセスBのログを確認することで「配送されていないこと」自体を確認した。
-
-## まとめ
-
-3つの計測結果を並べると次のようになる。
-
-- ベースライン（改善前、単一プロセス、タブ5本、更新3回）: List呼び出し20回（タブ数 × (初期スナップショット+更新回数)のN倍化）
-- fix #1適用後（dispatch時1回List化、単一プロセス、タブ5本、更新3回）: List呼び出し8回（更新分は1回化されたが、初期スナップショット分＝5回はタブ数に比例したまま残る）
-- fix #2適用後（チャンネルのuserID単位分割、2プロセス、user-shard-aのタブはプロセスAにのみ3本）: プロセスAのList呼び出しは9回（fix #1と同じ構造）、プロセスBのList呼び出しは0回（NOTIFY自体が配送されない）
-
-[docs/20260919-sse-fanout-load-analysis.md](./20260919-sse-fanout-load-analysis.md)で立てた仮説は、「fix #1（dispatch時1回化）は同一プロセス内での冗長なList呼び出しを減らす」「fix #2（チャンネル分割）は無関係なプロセスへのNOTIFY配送自体をなくす」という、役割の異なる独立した改善であるというものだった。今回の実測はこれを裏付けている。fix #1はプロセスAの内訳（9回 = タブ3 × (初期スナップショット1 + 更新2)）が示すとおり、初期スナップショット分は削減の対象外のまま残り、更新分だけが1回化される。fix #2はList呼び出し回数そのものではなく、無関係なプロセス（B）へのNOTIFY到達の有無に効く。両者は測定対象のレイヤーが異なるため（fix #1は「同一プロセス内でのList呼び出し回数」、fix #2は「プロセス間のNOTIFY到達範囲」）、片方だけでは他方の問題を解決できず、組み合わせて初めてタブ数・プロセス数双方に対してスケールする構造になる、という仮説が実測で確認された。
+**観察:** プロセスBの`/debug/loadtest-stats`が`{}`のまま変化しないことから、少なくとも`List`呼び出しは発生していないことを確認した。ただし、この時点の証拠（`/debug/loadtest-stats`が空であること、およびプロセスBのログに`wait for notification`や`dispatch`という文字列が出現しないこと）は、実は単一チャンネル方式とShardedHub方式を区別する決定的な証拠にはならない。単一チャンネル方式でもプロセスBに購読者がいなければ`List`は呼ばれない（`dispatch`はuserID一致かつ購読者ありの場合のみ`List`を呼ぶ）ため、この段階での「Bの`List`呼び出し0回」はどちらの設計でも成立し得る。さらに、両方の`Hub`実装ともNOTIFY受信に成功したときは何もログ出力しない（エラー時のみログを出す）ため、「ログに何も出ていないこと」は「NOTIFYが届いていないこと」の証明にはならない。この区別を実際につけるための計測は、後述のSection 6（NOTIFY受信件数カウンタによる検証）で行った。
 
 ## 4. 改善前後の接続関係
 
