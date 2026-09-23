@@ -20,3 +20,6 @@ Thumbs.db
 
 # git worktrees
 /.worktrees
+
+# local docker compose port overrides (worktree-specific)
+docker-compose.override.yml
