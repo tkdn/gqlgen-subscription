@@ -17,7 +17,7 @@ type ShardedConnectFunc func(ctx context.Context) (*pgx.Conn, error)
 // ListFunc はuserIDの最新ジョブ一覧を取得する関数。
 type ShardedListFunc func(ctx context.Context, userID string) ([]*model.Job, error)
 
-// ShardedHub はuserIDごとに専用のNOTIFYチャンネル(channelPrefix_userID)を
+// ShardedHub はuserIDごとに専用のNOTIFYチャンネル（channelPrefix_userID）を
 // LISTENする検証専用のfan-out層。参照カウントによるUNLISTEN共有などの
 // 本番品質の最適化は行わない最小実装。
 type ShardedHub struct {
@@ -30,14 +30,14 @@ type ShardedHub struct {
 }
 
 // NewShardedHub はShardedHubを生成する。実際のLISTENはSubscribe呼び出しの
-// たびに、そのuserID専用の接続で行われる(Hub生成時点では何もLISTENしない)。
+// たびに、そのuserID専用の接続で行われる（Hub生成時点では何もLISTENしない）。
 func NewShardedHub(ctx context.Context, connect ShardedConnectFunc, channelPrefix string, list ShardedListFunc) *ShardedHub {
 	return &ShardedHub{connect: connect, channelPrefix: channelPrefix, list: list}
 }
 
-// Subscribe はuserID専用のチャンネル(channelPrefix_userID)に対する新しいLISTEN接続を張る。
+// Subscribe はuserID専用のチャンネル（channelPrefix_userID）に対する新しいLISTEN接続を張る。
 // unsubscribeはこの接続をクローズする。
-// 最小実装のため、同一userIDへの複数回のSubscribeはそれぞれ独立した接続を張る(本番品質の接続共有・参照カウントは行わない)。
+// 最小実装のため、同一userIDへの複数回のSubscribeはそれぞれ独立した接続を張る（本番品質の接続共有・参照カウントは行わない）。
 func (h *ShardedHub) Subscribe(userID string) (ch <-chan []*model.Job, unsubscribe func(), err error) {
 	ctx, cancel := context.WithCancel(context.Background())
 

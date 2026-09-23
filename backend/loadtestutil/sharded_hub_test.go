@@ -58,7 +58,7 @@ func TestShardedHub_OnlyDeliversToSubscribedUser(t *testing.T) {
 
 	// user-bはSubscribeしない。user-bへのNOTIFYがuser-aに届かないことを確認する。
 
-	// LISTEN確立を待つ簡易な猶予(本番品質の同期はしない、最小実装のため)。
+	// LISTEN確立を待つ簡易な猶予（本番品質の同期はしない、最小実装のため）。
 	time.Sleep(300 * time.Millisecond)
 
 	notifyConn, err := pgx.Connect(t.Context(), "")
