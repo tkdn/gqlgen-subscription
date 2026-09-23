@@ -15,6 +15,7 @@ import (
 	"github.com/tkdn/gqlgen-subscription/backend/awsconfig"
 	"github.com/tkdn/gqlgen-subscription/backend/consumer"
 	"github.com/tkdn/gqlgen-subscription/backend/graph"
+	"github.com/tkdn/gqlgen-subscription/backend/loadtestutil"
 	"github.com/tkdn/gqlgen-subscription/backend/pgclient"
 	"github.com/tkdn/gqlgen-subscription/backend/pgjobstore"
 	"github.com/tkdn/gqlgen-subscription/backend/pgpubsub"
@@ -60,7 +61,7 @@ func main() {
 		log.Fatalf("ensure queue %q: %v", completionsQueueName, err)
 	}
 
-	jobStore := pgjobstore.New(pool, pgjobstore.UpdatesChannel)
+	countingJobStore := loadtestutil.NewCountingJobStore(pgjobstore.New(pool, pgjobstore.UpdatesChannel))
 
 	hub, err := pgpubsub.New(ctx, pgclient.Connect, pgjobstore.UpdatesChannel)
 	if err != nil {
@@ -69,7 +70,7 @@ func main() {
 	defer hub.Close()
 
 	resolver := &graph.Resolver{
-		JobStore:   jobStore,
+		JobStore:   countingJobStore,
 		Hub:        hub,
 		Dispatcher: sqsdispatch.New(sqsClient, requestsURL),
 	}
@@ -77,6 +78,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/", playground.Handler("GraphQL playground", "/query"))
 	mux.Handle("/query", graph.NewHandler(resolver))
+	mux.Handle("/debug/loadtest-stats", loadtestutil.NewStatsHandler(countingJobStore))
 
 	httpServer := &http.Server{
 		Addr:    ":" + port,
@@ -90,7 +92,7 @@ func main() {
 		log.Println("completion consumer disabled by SKIP_COMPLETION_CONSUMER")
 	} else {
 		go func() {
-			if err := consumer.Run(ctx, sqsClient, jobStore, completionsURL); err != nil {
+			if err := consumer.Run(ctx, sqsClient, countingJobStore, completionsURL); err != nil {
 				log.Printf("consumer: %v", err)
 			}
 		}()
