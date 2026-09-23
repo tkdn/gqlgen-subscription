@@ -77,18 +77,27 @@ func (h *ShardedHub[T]) Subscribe(userID string) (ch <-chan []T, unsubscribe fun
 	sc.subs[dataCh] = struct{}{}
 	sc.mu.Unlock()
 
+	// 購読者ゼロ判定とマップからの削除は、h.muを保持したまま一貫して行う。
+	// sc.muの解放後にh.muを取り直す形にすると、その間隙で同一userIDへの
+	// 新規Subscribeが同じshardedChannelを再利用してしまい（購読者がゼロに
+	// なった直後に登録されたため）、その直後にこのunsubscribeがマップから
+	// 消してcancelする、という競合が起こり得る。h.muを先に取ってから
+	// sc.mu側の判定を行うことで、新規Subscribeの`h.channels[userID]`参照と
+	// このunsubscribeの削除判定が同じロックの下で不可分になり、この競合を
+	// 防ぐ。ロック順序は常にh.mu→sc.muを守る（Subscribeもこの順序）。
 	unsubscribe = func() {
+		h.mu.Lock()
 		sc.mu.Lock()
 		delete(sc.subs, dataCh)
 		empty := len(sc.subs) == 0
 		sc.mu.Unlock()
 
+		if empty && h.channels[userID] == sc {
+			delete(h.channels, userID)
+		}
+		h.mu.Unlock()
+
 		if empty {
-			h.mu.Lock()
-			if h.channels[userID] == sc {
-				delete(h.channels, userID)
-			}
-			h.mu.Unlock()
 			sc.cancel()
 			<-sc.done
 		}
