@@ -239,3 +239,98 @@ sequenceDiagram
 ```
 
 タブの本数に関わらず、1回の更新につき`SELECT ... FROM jobs WHERE user_id`は1回だけ発行される。チャンネルをuserID単位に分割しているため、無関係なユーザー宛のNOTIFYはこのプロセスに一切届かない。
+
+（補足: 上記の図は`pgpubsub.Hub`（単一チャンネル・dispatch集約）の構造を示しているが、Task 12でチャンネル分割側の`ShardedHub`にも同じdispatch集約ロジックを移植したため、`Hub`を`ShardedHub`に、`job_updates_userID`を`job_updates_sharded_userID`に読み替えれば、userIDごとに独立したチャンネルを使いながら同じ集約効果を持つ構成として、この図はそのまま成立する。Task 10時点の`ShardedHub`はこの集約ロジックを持たず、購読者ごとに独立して`List`を呼んでいたため、この図が示す挙動とは異なっていた。）
+
+## 5. fix #1 + fix #2 組み合わせ後の計測
+
+Task 10までの計測で、ShardedHub（fix #2）は無関係プロセスへの配信を防ぐ効果を持つ一方、同一プロセス内でのタブ数比例の重複List呼び出し（fix #1が解決する問題）を継承していないことが判明した。このセクションでは、ShardedHubにfix #1のdispatch集約ロジックを移植し、両方の効果が同時に成立することを計測で確認する。
+
+条件: プロセスA（ポート8080）にタブ5本を接続、プロセスB（ポート8081）は同じユーザーの接続を持たない。updateJobStatus 3回。
+
+```
+$ docker compose up -d
+ Container sse-fanout-loadtest-redis-1 Starting
+ Container sse-fanout-loadtest-kumo-1 Starting
+ Container sse-fanout-loadtest-postgres-1 Starting
+ Container sse-fanout-loadtest-redis-1 Started
+ Container sse-fanout-loadtest-kumo-1 Started
+ Container sse-fanout-loadtest-postgres-1 Started
+
+$ cd backend
+$ direnv exec . env PORT=8080 LOADTEST_SHARDED_HUB=true AWS_ENDPOINT_URL=http://localhost:14566 go run ./cmd > /tmp/loadtest-process-8080-combined.log 2>&1 &
+$ direnv exec . env PORT=8081 LOADTEST_SHARDED_HUB=true AWS_ENDPOINT_URL=http://localhost:14566 go run ./cmd > /tmp/loadtest-process-8081-combined.log 2>&1 &
+$ cat /tmp/loadtest-process-8080-combined.log
+2026/09/23 21:18:27 loadtest: using ShardedHub (userID単位のNOTIFYチャンネル分割)
+2026/09/23 21:18:27 connect to http://localhost:8080/ for GraphQL playground
+$ cat /tmp/loadtest-process-8081-combined.log
+2026/09/23 21:18:37 loadtest: using ShardedHub (userID単位のNOTIFYチャンネル分割)
+2026/09/23 21:18:37 connect to http://localhost:8081/ for GraphQL playground
+
+$ direnv exec . go run ./cmd/loadtest -tabs=5 -processes=http://localhost:8080 -updates=3 -interval=2s
+2026/09/23 21:18:54 created job id=01a0ce34-60b2-73e4-bedd-64e54b10d1b4 on http://localhost:8080
+2026/09/23 21:18:54 [2026-09-23T21:18:54.28471035+09:00] タブ1 受信
+2026/09/23 21:18:54 [2026-09-23T21:18:54.288212927+09:00] タブ3 受信
+2026/09/23 21:18:54 [2026-09-23T21:18:54.28921693+09:00] タブ2 受信
+2026/09/23 21:18:54 [2026-09-23T21:18:54.289973349+09:00] タブ0 受信
+2026/09/23 21:18:54 [2026-09-23T21:18:54.296175974+09:00] タブ4 受信
+2026/09/23 21:18:54 [2026-09-23T21:18:54.773342999+09:00] fired updateJobStatus id=01a0ce34-60b2-73e4-bedd-64e54b10d1b4 status=ANALYZING
+2026/09/23 21:18:54 [2026-09-23T21:18:54.791297302+09:00] タブ4 受信
+2026/09/23 21:18:54 [2026-09-23T21:18:54.791264489+09:00] タブ2 受信
+2026/09/23 21:18:54 [2026-09-23T21:18:54.791301531+09:00] タブ1 受信
+2026/09/23 21:18:54 [2026-09-23T21:18:54.79133737+09:00] タブ0 受信
+2026/09/23 21:18:54 [2026-09-23T21:18:54.791504213+09:00] タブ3 受信
+2026/09/23 21:18:56 [2026-09-23T21:18:56.799886542+09:00] fired updateJobStatus id=01a0ce34-60b2-73e4-bedd-64e54b10d1b4 status=GENERATING
+2026/09/23 21:18:56 [2026-09-23T21:18:56.813303384+09:00] タブ2 受信
+2026/09/23 21:18:56 [2026-09-23T21:18:56.813312951+09:00] タブ0 受信
+2026/09/23 21:18:56 [2026-09-23T21:18:56.813321725+09:00] タブ4 受信
+2026/09/23 21:18:56 [2026-09-23T21:18:56.813327144+09:00] タブ3 受信
+2026/09/23 21:18:56 [2026-09-23T21:18:56.813338316+09:00] タブ1 受信
+2026/09/23 21:18:58 [2026-09-23T21:18:58.815411808+09:00] fired updateJobStatus id=01a0ce34-60b2-73e4-bedd-64e54b10d1b4 status=COMPLETED
+2026/09/23 21:18:58 [2026-09-23T21:18:58.822410208+09:00] タブ3 受信
+2026/09/23 21:18:58 [2026-09-23T21:18:58.822434977+09:00] タブ2 受信
+2026/09/23 21:18:58 [2026-09-23T21:18:58.822467167+09:00] タブ4 受信
+2026/09/23 21:18:58 [2026-09-23T21:18:58.822482767+09:00] タブ0 受信
+2026/09/23 21:18:58 [2026-09-23T21:18:58.822592502+09:00] タブ1 受信
+2026/09/23 21:19:02 tab 0: scan error: context canceled
+2026/09/23 21:19:02 tab 2: scan error: context canceled
+2026/09/23 21:19:02 tab 3: scan error: context canceled
+2026/09/23 21:19:02 tab 1: scan error: context canceled
+2026/09/23 21:19:02 tab 4: scan error: context canceled
+
+=== 結果 ===
+タブ数: 5, 更新回数: 3, ユーザー: loadtest-user-1790165934253533010
+
+--- 各タブの受信回数 ---
+タブ0 (接続先 http://localhost:8080): 4回受信
+タブ1 (接続先 http://localhost:8080): 4回受信
+タブ2 (接続先 http://localhost:8080): 4回受信
+タブ3 (接続先 http://localhost:8080): 4回受信
+タブ4 (接続先 http://localhost:8080): 4回受信
+
+--- 各プロセスのList呼び出し回数（累積） ---
+http://localhost:8080: map[loadtest-user-1790165934253533010:8]
+
+$ curl -s http://localhost:8080/debug/loadtest-stats
+{"list_call_counts_by_user":{"loadtest-user-1790165934253533010":8}}
+
+$ curl -s http://localhost:8081/debug/loadtest-stats
+{"list_call_counts_by_user":{}}
+
+$ kill $(cat /tmp/loadtest-process-8080-combined.pid) $(cat /tmp/loadtest-process-8081-combined.pid) 2>/dev/null
+$ lsof -ti :8080 | xargs -r kill 2>/dev/null
+$ lsof -ti :8081 | xargs -r kill 2>/dev/null
+$ docker compose down
+ Container sse-fanout-loadtest-redis-1 Removing
+ Container sse-fanout-loadtest-redis-1 Removed
+ Container sse-fanout-loadtest-kumo-1 Stopped
+ Container sse-fanout-loadtest-kumo-1 Removing
+ Container sse-fanout-loadtest-kumo-1 Removed
+ Container sse-fanout-loadtest-postgres-1 Stopped
+ Container sse-fanout-loadtest-postgres-1 Removing
+ Container sse-fanout-loadtest-postgres-1 Removed
+ Network sse-fanout-loadtest_default Removing
+ Network sse-fanout-loadtest_default Removed
+```
+
+**観察:** プロセスAのList呼び出し回数はタブ5本・更新3回の条件で8回だった。内訳は、`ShardedHub`のdispatch集約により更新1回につきタブ数に関わらずList呼び出しが1回に収束するため更新分3回、加えてsubscription確立直後の初期スナップショット取得（`schema.resolvers.go`の`JobStore.List`呼び出し、Hubを経由しない別経路であり本タスクの変更対象外）がタブ数分（5回）そのまま発生するため、3+5=8回という合計になった。これはタブ数5に依存しない値になっており、Task 10（タブ3×(1+2)=9回、タブ数に完全比例）との対比で、fix #1のdispatch集約効果がfix #2（userID単位チャンネル分割）と共存できることを裏付けている。また、プロセスBのList呼び出し回数は`{}`（0）のままであり、無関係プロセスへの配信が発生しないというfix #2の効果も同時に維持されていることを確認した。
