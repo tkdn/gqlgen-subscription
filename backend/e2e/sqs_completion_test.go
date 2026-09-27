@@ -2,10 +2,7 @@ package e2e_test
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -87,129 +84,51 @@ func newSQSTestServer(t *testing.T) *httptest.Server {
 	return server
 }
 
-// jobStatusesStream はjobStatuses subscriptionのSSEイベントを、単一の
-// 背景goroutineで読み進めてチャネルに流し続ける。sseReaderを直接複数の
-// goroutineから読むと競合するため、購読開始時に一度だけ読み取りgoroutineを
-// 起動し、以後の待ち受けはすべてこのチャネル越しに行う。
-type jobStatusesStream struct {
-	events chan sseEvent
-	closed chan struct{}
-}
-
-func (s *jobStatusesStream) next(t *testing.T, timeout time.Duration) (sseEvent, bool) {
-	t.Helper()
-	select {
-	case ev := <-s.events:
-		return ev, true
-	case <-s.closed:
-		return sseEvent{}, false
-	case <-time.After(timeout):
-		return sseEvent{}, false
-	}
-}
-
-// waitForStatus はstreamから、statusがwantと一致するスナップショットが
-// 届くまでイベントを読み進める。他のstatusのイベント（例: 初期snapshotや
-// PENDING）は読み捨てて次を待つ。timeout以内に届かなければテストを失敗させる。
-func waitForStatus(t *testing.T, stream *jobStatusesStream, want string, timeout time.Duration) jobStatusesPayload {
+// waitForStatus はjobs queryで一覧を取り直し、唯一のジョブのstatusがwantに
+// なるまで、invalidationが届くたびに取り直しを繰り返す。取り直しを先に
+// 行うので、待ち始める前に遷移が済んでいても拾える。
+func waitForStatus(t *testing.T, stream *invalidationStream, serverURL, want string, timeout time.Duration) {
 	t.Helper()
 
 	deadline := time.Now().Add(timeout)
 	for {
+		if jobs := queryJobs(t, serverURL).Data.Jobs; len(jobs) == 1 && jobs[0].Status == want {
+			return
+		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			t.Fatalf("timed out waiting for status %q", want)
 		}
-		ev, ok := stream.next(t, remaining)
-		if !ok {
+		if _, ok := stream.next(t, remaining); !ok {
 			t.Fatalf("timed out or stream closed waiting for status %q", want)
 		}
-		var payload jobStatusesPayload
-		if err := json.Unmarshal([]byte(ev.Data), &payload); err != nil {
-			t.Fatalf("unmarshal SSE event: %v", err)
-		}
-		if len(payload.Data.JobStatuses) == 1 && payload.Data.JobStatuses[0].Status == want {
-			return payload
-		}
 	}
 }
 
-// subscribeJobStatuses はjobStatuses subscriptionへ接続し、以後のイベントを
-// 単一の背景goroutineでチャネルへ流し続けるjobStatusesStreamを返す。
-func subscribeJobStatuses(t *testing.T, serverURL string) *jobStatusesStream {
-	t.Helper()
-
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, serverURL,
-		strings.NewReader(`{"query": "subscription { jobStatuses { id name status } }"}`))
-	if err != nil {
-		t.Fatalf("NewRequest() error = %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("subscription request error = %v", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("subscription status = %d, want 200", resp.StatusCode)
-	}
-	t.Cleanup(func() { resp.Body.Close() })
-
-	reader := newSSEReader(resp)
-	stream := &jobStatusesStream{
-		events: make(chan sseEvent),
-		closed: make(chan struct{}),
-	}
-	go func() {
-		defer close(stream.closed)
-		for {
-			ev, ok := reader.next()
-			if !ok {
-				return
-			}
-			stream.events <- ev
-		}
-	}()
-
-	return stream
-}
-
+// 作成したジョブがワーカーで完了し、invalidationのたびの取り直しでPENDINGからCOMPLETEDまでを追えること。
 func TestSQSCompletionFlow_CreateJobDeliversCompletedStatus(t *testing.T) {
 	server := newSQSTestServer(t)
+	url := server.URL + "/query"
 
-	stream := subscribeJobStatuses(t, server.URL+"/query")
+	stream := subscribeJobsInvalidated(t, url)
+	expectInvalidation(t, stream, 3*time.Second)
 
-	// (1) 接続直後の初期スナップショット（ジョブがまだ無いので空配列）。
-	ev, ok := stream.next(t, 3*time.Second)
-	if !ok {
-		t.Fatal("expected initial snapshot event, got none")
-	}
-	if ev.Event != "next" {
-		t.Fatalf("initial event.Event = %q, want %q", ev.Event, "next")
-	}
+	graphqlRequest(t, url, `mutation { createJob(name: "job-sqs-e2e-1") { id name status } }`)
 
-	graphqlRequest(t, server.URL+"/query", `mutation { createJob(name: "job-sqs-e2e-1") { id name status } }`)
-
-	waitForStatus(t, stream, "PENDING", 3*time.Second)
-	waitForStatus(t, stream, "COMPLETED", 3*time.Second)
+	waitForStatus(t, stream, url, "PENDING", 3*time.Second)
+	waitForStatus(t, stream, url, "COMPLETED", 3*time.Second)
 }
 
+// 名前がfail-で始まるジョブは失敗し、invalidationのたびの取り直しでPENDINGからFAILEDまでを追えること。
 func TestSQSCompletionFlow_FailNamePrefixDeliversFailedStatus(t *testing.T) {
 	server := newSQSTestServer(t)
+	url := server.URL + "/query"
 
-	stream := subscribeJobStatuses(t, server.URL+"/query")
+	stream := subscribeJobsInvalidated(t, url)
+	expectInvalidation(t, stream, 3*time.Second)
 
-	ev, ok := stream.next(t, 3*time.Second)
-	if !ok {
-		t.Fatal("expected initial snapshot event, got none")
-	}
-	if ev.Event != "next" {
-		t.Fatalf("initial event.Event = %q, want %q", ev.Event, "next")
-	}
+	graphqlRequest(t, url, `mutation { createJob(name: "fail-sqs-e2e-1") { id name status } }`)
 
-	graphqlRequest(t, server.URL+"/query", `mutation { createJob(name: "fail-sqs-e2e-1") { id name status } }`)
-
-	waitForStatus(t, stream, "PENDING", 3*time.Second)
-	waitForStatus(t, stream, "FAILED", 3*time.Second)
+	waitForStatus(t, stream, url, "PENDING", 3*time.Second)
+	waitForStatus(t, stream, url, "FAILED", 3*time.Second)
 }

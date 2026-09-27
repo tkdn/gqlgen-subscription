@@ -156,12 +156,14 @@ curl -s http://localhost:8080/query -H 'content-type: application/json' \
 ```
 
 SSE配信（PostgreSQL LISTEN→Hub→SSE）まで通しで見る場合は、タスク内で
-購読を開きっぱなしにし、別のECS Execセッションから`createJob`を打つ:
+購読を開きっぱなしにし、別のECS Execセッションから`createJob`を打つ。
+SSEで届くのは`{"data":{"jobsInvalidated":true}}`という取り直しの合図だけで、
+ジョブの中身は`jobs` queryで確認する:
 
 ```sh
 curl -N -s http://localhost:8080/query \
   -H 'accept: text/event-stream' -H 'content-type: application/json' \
-  --data '{"query":"subscription { jobStatuses { id name status } }"}'
+  --data '{"query":"subscription { jobsInvalidated }"}'
 ```
 
 ## 6. Lambda発火の確認

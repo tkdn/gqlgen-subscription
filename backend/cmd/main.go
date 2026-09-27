@@ -15,6 +15,7 @@ import (
 	"github.com/tkdn/gqlgen-subscription/backend/awsconfig"
 	"github.com/tkdn/gqlgen-subscription/backend/consumer"
 	"github.com/tkdn/gqlgen-subscription/backend/graph"
+	"github.com/tkdn/gqlgen-subscription/backend/httpserver"
 	"github.com/tkdn/gqlgen-subscription/backend/pgclient"
 	"github.com/tkdn/gqlgen-subscription/backend/pgjobstore"
 	"github.com/tkdn/gqlgen-subscription/backend/pgpubsub"
@@ -25,6 +26,7 @@ const (
 	defaultPort          = "8080"
 	requestsQueueName    = "job-requests"
 	completionsQueueName = "job-completions"
+	shutdownGrace        = 5 * time.Second
 )
 
 func main() {
@@ -107,10 +109,7 @@ func main() {
 	stop()
 	log.Println("shutting down...")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+	if err := httpserver.Shutdown(httpServer, shutdownGrace); err != nil {
 		log.Printf("server shutdown: %v", err)
 	}
 }

@@ -180,14 +180,118 @@ func (r *sseReader) next() (sseEvent, bool) {
 	return sseEvent{}, false
 }
 
-// jobStatusesPayload はjobStatuses subscriptionのdataペイロードの形。
-type jobStatusesPayload struct {
+// invalidationStream はjobsInvalidated subscriptionのSSEイベントをチャネルで
+// 受け取れるようにする。sseReaderを複数のgoroutineから読むと競合するので、
+// 購読の開始時にsseReaderを読み続けるgoroutineを1つだけ起動し、読んだ
+// イベントをeventsへ送る。テストはeventsとclosedだけを見て待つ。
+type invalidationStream struct {
+	header http.Header
+	events chan sseEvent
+	closed chan struct{}
+}
+
+func (s *invalidationStream) next(t *testing.T, timeout time.Duration) (sseEvent, bool) {
+	t.Helper()
+	select {
+	case ev := <-s.events:
+		return ev, true
+	case <-s.closed:
+		return sseEvent{}, false
+	case <-time.After(timeout):
+		return sseEvent{}, false
+	}
+}
+
+// subscribeJobsInvalidated はjobsInvalidated subscriptionへ接続し、以後の
+// イベントを流し続けるinvalidationStreamを返す。
+func subscribeJobsInvalidated(t *testing.T, serverURL string) *invalidationStream {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, serverURL,
+		strings.NewReader(`{"query": "subscription { jobsInvalidated }"}`))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("subscription request error = %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("subscription status = %d, want 200", resp.StatusCode)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	reader := newSSEReader(resp)
+	stream := &invalidationStream{
+		header: resp.Header,
+		events: make(chan sseEvent),
+		closed: make(chan struct{}),
+	}
+	go func() {
+		defer close(stream.closed)
+		for {
+			ev, ok := reader.next()
+			if !ok {
+				return
+			}
+			stream.events <- ev
+		}
+	}()
+
+	return stream
+}
+
+// jobsInvalidatedPayload はjobsInvalidated subscriptionのdataペイロードの形。
+type jobsInvalidatedPayload struct {
 	Data struct {
-		JobStatuses []struct {
+		JobsInvalidated bool `json:"jobsInvalidated"`
+	} `json:"data"`
+}
+
+// expectInvalidation はstreamからinvalidationが1件届くことを確かめる。
+func expectInvalidation(t *testing.T, stream *invalidationStream, timeout time.Duration) {
+	t.Helper()
+
+	ev, ok := stream.next(t, timeout)
+	if !ok {
+		t.Fatal("timed out or stream closed waiting for an invalidation")
+	}
+	if ev.Event != "next" {
+		t.Fatalf("event.Event = %q, want %q", ev.Event, "next")
+	}
+	var payload jobsInvalidatedPayload
+	if err := json.Unmarshal([]byte(ev.Data), &payload); err != nil {
+		t.Fatalf("unmarshal invalidation event: %v", err)
+	}
+	if !payload.Data.JobsInvalidated {
+		t.Fatalf("jobsInvalidated = false in %s, want true", ev.Data)
+	}
+}
+
+// jobsPayload はjobs queryのdataペイロードの形。
+type jobsPayload struct {
+	Data struct {
+		Jobs []struct {
+			ID     string `json:"id"`
 			Name   string `json:"name"`
 			Status string `json:"status"`
-		} `json:"jobStatuses"`
+		} `json:"jobs"`
 	} `json:"data"`
+}
+
+// queryJobs はjobs queryで現在のジョブ一覧を取得する。
+func queryJobs(t *testing.T, serverURL string) jobsPayload {
+	t.Helper()
+
+	resp := graphqlRequest(t, serverURL, `query { jobs { id name status } }`)
+	var payload jobsPayload
+	if err := json.Unmarshal(resp, &payload); err != nil {
+		t.Fatalf("unmarshal jobs response: %v (%s)", err, resp)
+	}
+	return payload
 }
 
 // createJobPayload はcreateJob mutationのdataペイロードの形。
@@ -199,10 +303,12 @@ type createJobPayload struct {
 	} `json:"data"`
 }
 
-func TestSSESubscription_DeliversInitialSnapshotAndUpdates(t *testing.T) {
+// SSEで接続直後と更新時にinvalidationが届き、そのたびにjobs queryで最新の一覧が取れること。
+func TestSSESubscription_DeliversInvalidationOnConnectAndOnUpdate(t *testing.T) {
 	server := newTestServer(t)
+	url := server.URL + "/query"
 
-	createResp := graphqlRequest(t, server.URL+"/query", `mutation { createJob(name: "job-1") { id name status } }`)
+	createResp := graphqlRequest(t, url, `mutation { createJob(name: "job-1") { id name status } }`)
 	var created createJobPayload
 	if err := json.Unmarshal(createResp, &created); err != nil {
 		t.Fatalf("unmarshal createJob response: %v", err)
@@ -212,74 +318,22 @@ func TestSSESubscription_DeliversInitialSnapshotAndUpdates(t *testing.T) {
 		t.Fatalf("createJob response has empty id: %s", createResp)
 	}
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, server.URL+"/query",
-		strings.NewReader(`{"query": "subscription { jobStatuses { name status } }"}`))
-	if err != nil {
-		t.Fatalf("NewRequest() error = %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
+	stream := subscribeJobsInvalidated(t, url)
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("subscription request error = %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("subscription status = %d, want 200", resp.StatusCode)
+	if got := stream.header.Get("X-Accel-Buffering"); got != "no" {
+		t.Errorf("X-Accel-Buffering = %q, want %q", got, "no")
 	}
 
-	reader := newSSEReader(resp)
-
-	// (1) 接続直後の初期スナップショット。
-	ev, ok := reader.next()
-	if !ok {
-		t.Fatal("expected initial snapshot event, got none")
-	}
-	if ev.Event != "next" {
-		t.Fatalf("initial event.Event = %q, want %q", ev.Event, "next")
-	}
-	var initial jobStatusesPayload
-	if err := json.Unmarshal([]byte(ev.Data), &initial); err != nil {
-		t.Fatalf("unmarshal initial event: %v", err)
-	}
-	if len(initial.Data.JobStatuses) != 1 || initial.Data.JobStatuses[0].Status != "PENDING" {
-		t.Fatalf("initial snapshot = %+v, want single PENDING job-1", initial.Data.JobStatuses)
+	// (1) 接続直後のinvalidation。これを受けて取り直した一覧に、接続前に作ったジョブが含まれる。
+	expectInvalidation(t, stream, 3*time.Second)
+	if jobs := queryJobs(t, url).Data.Jobs; len(jobs) != 1 || jobs[0].Status != "PENDING" {
+		t.Fatalf("jobs after connect = %+v, want single PENDING job-1", jobs)
 	}
 
-	// (2) updateJobStatusをトリガーに、更新後のスナップショットが流れてくる。
-	updateDone := make(chan struct{})
-	go func() {
-		defer close(updateDone)
-		graphqlRequest(t, server.URL+"/query",
-			fmt.Sprintf(`mutation { updateJobStatus(id: %q, status: ANALYZING) { name status } }`, jobID))
-	}()
-	<-updateDone
-
-	type result struct {
-		ev sseEvent
-		ok bool
-	}
-	resultCh := make(chan result, 1)
-	go func() {
-		ev, ok := reader.next()
-		resultCh <- result{ev, ok}
-	}()
-
-	select {
-	case res := <-resultCh:
-		if !res.ok {
-			t.Fatal("expected update event, got none")
-		}
-		var updated jobStatusesPayload
-		if err := json.Unmarshal([]byte(res.ev.Data), &updated); err != nil {
-			t.Fatalf("unmarshal update event: %v", err)
-		}
-		if len(updated.Data.JobStatuses) != 1 || updated.Data.JobStatuses[0].Status != "ANALYZING" {
-			t.Fatalf("updated snapshot = %+v, want single ANALYZING job-1", updated.Data.JobStatuses)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for update event")
+	// (2) 更新をきっかけにinvalidationが届き、取り直した一覧に更新が反映されている。
+	graphqlRequest(t, url, fmt.Sprintf(`mutation { updateJobStatus(id: %q, status: ANALYZING) { id } }`, jobID))
+	expectInvalidation(t, stream, 3*time.Second)
+	if jobs := queryJobs(t, url).Data.Jobs; len(jobs) != 1 || jobs[0].Status != "ANALYZING" {
+		t.Fatalf("jobs after update = %+v, want single ANALYZING job-1", jobs)
 	}
 }

@@ -66,8 +66,8 @@ func listen(ctx context.Context, conn *pgx.Conn, channel string) error {
 
 // Subscribe はuserIDのジョブ更新通知を購読する。戻り値のチャネルは、
 // 該当ユーザーのジョブが更新されるたびに（ペイロード内容を問わず）
-// トリガーとして通知を受け取る。呼び出し側はこの通知をきっかけに
-// jobstore.List等でスナップショットを取り直す想定。
+// トリガーとして通知を受け取る。呼び出し側はこの通知を、一覧の
+// 取り直しを促すinvalidationとしてクライアントへ中継する想定。
 //
 // LISTENはHub生成時に確立済みのため、Redis版（pubsub.Hub）にあった
 // 「SUBSCRIBE受理を待ってから返す」race対策は構造的に不要。登録のみで返る。
@@ -99,8 +99,8 @@ func (h *Hub) Close() {
 
 // run は通知を受信するたびにペイロード（userID）に一致する購読者へ
 // 非ブロッキングで配送する。接続が切れた場合は再接続・再LISTENを試みる。
-// 再接続中に発行された通知は失われるが、受信側は通知のたびに最新
-// スナップショットを取り直すため、次の通知で回復する。
+// 再接続中に発行された通知は失われるが、クライアントはinvalidationの
+// たびに一覧をまるごと取り直すため、次の通知で回復する。
 func (h *Hub) run(ctx context.Context, conn *pgx.Conn) {
 	defer close(h.done)
 	defer func() {
@@ -160,8 +160,7 @@ func (h *Hub) dispatch(userID string) {
 		select {
 		case triggerCh <- struct{}{}:
 		default:
-			// バッファ済みの通知が残っている場合は取りこぼしても問題ない
-			// （受信側は通知のたびに最新スナップショットを取り直すため）。
+			// 未読の通知が残っていれば、それだけで一覧の取り直しは促される。
 		}
 	}
 }

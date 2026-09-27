@@ -7,11 +7,7 @@ import { SSELink } from './sse-link';
 
 const TEST_QUERY = gql`
   subscription TestSubscription {
-    jobStatuses {
-      id
-      name
-      status
-    }
+    jobsInvalidated
   }
 `;
 
@@ -52,10 +48,8 @@ describe('SSELink', () => {
     expect(request.query).toContain('TestSubscription');
     expect(request.operationName).toBe('TestSubscription');
 
-    sink.next({ data: { jobStatuses: [{ id: '1', name: 'job-1', status: 'PENDING' }] } });
-    expect(results).toEqual([
-      { data: { jobStatuses: [{ id: '1', name: 'job-1', status: 'PENDING' }] } },
-    ]);
+    sink.next({ data: { jobsInvalidated: true } });
+    expect(results).toEqual([{ data: { jobsInvalidated: true } }]);
 
     sink.complete();
     expect(completed).toBe(true);

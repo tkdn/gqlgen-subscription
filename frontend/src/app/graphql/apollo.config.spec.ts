@@ -3,7 +3,8 @@ import gql from 'graphql-tag';
 import { HttpLink } from 'apollo-angular/http';
 import { describe, expect, it, vi } from 'vitest';
 
-import { apolloOptionsFactory } from './apollo.config';
+import { apolloOptionsFactory, SSE_CLIENT_OPTIONS } from './apollo.config';
+import { waitForRetry } from './retry';
 import { SSELink } from './sse-link';
 
 // @apollo/client v4's `execute` requires a third `ApolloLink.ExecuteContext`
@@ -33,11 +34,7 @@ const TEST_MUTATION = gql`
 
 const TEST_SUBSCRIPTION = gql`
   subscription TestSubscription {
-    jobStatuses {
-      id
-      name
-      status
-    }
+    jobsInvalidated
   }
 `;
 
@@ -149,5 +146,14 @@ describe('apolloOptionsFactory', () => {
     } finally {
       vi.restoreAllMocks();
     }
+  });
+});
+
+describe('SSE_CLIENT_OPTIONS', () => {
+  // SSEクライアントは回数無制限で再試行し、待ち時間にwaitForRetryを使う。
+  it('retries without a count limit, waiting with waitForRetry', () => {
+    expect(SSE_CLIENT_OPTIONS.url).toBe('/query');
+    expect(SSE_CLIENT_OPTIONS.retryAttempts).toBe(Infinity);
+    expect(SSE_CLIENT_OPTIONS.retry).toBe(waitForRetry);
   });
 });

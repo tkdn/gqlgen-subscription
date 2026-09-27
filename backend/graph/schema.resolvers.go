@@ -8,7 +8,6 @@ package graph
 import (
 	"context"
 	"fmt"
-	"log"
 
 	"github.com/tkdn/gqlgen-subscription/backend/graph/model"
 	"github.com/tkdn/gqlgen-subscription/backend/userctx"
@@ -38,24 +37,18 @@ func (r *queryResolver) Jobs(ctx context.Context) ([]*model.Job, error) {
 	return r.JobStore.List(ctx, userctx.UserID(ctx))
 }
 
-// JobStatuses is the resolver for the jobStatuses field.
-func (r *subscriptionResolver) JobStatuses(ctx context.Context) (<-chan []*model.Job, error) {
-	userID := userctx.UserID(ctx)
-
-	notify, unsubscribe, err := r.Hub.Subscribe(userID)
+// JobsInvalidated is the resolver for the jobsInvalidated field.
+func (r *subscriptionResolver) JobsInvalidated(ctx context.Context) (<-chan bool, error) {
+	notify, unsubscribe, err := r.Hub.Subscribe(userctx.UserID(ctx))
 	if err != nil {
 		return nil, err
 	}
 
-	ch := make(chan []*model.Job, 1)
-
-	// 接続直後に初期スナップショットを配信する。
-	initial, err := r.JobStore.List(ctx, userID)
-	if err != nil {
-		unsubscribe()
-		return nil, err
-	}
-	ch <- initial
+	ch := make(chan bool, 1)
+	// 購読していなかった間の更新は通知されないので、クライアントの状態は
+	// 購読の開始時点で古い可能性がある。そのため購読の開始自体を最初の
+	// invalidationとして送る。Hubへの登録後に送るので、以降の更新は通知で届く。
+	ch <- true
 
 	go func() {
 		defer close(ch)
@@ -69,16 +62,12 @@ func (r *subscriptionResolver) JobStatuses(ctx context.Context) (<-chan []*model
 				if !ok {
 					return
 				}
-				jobs, err := r.JobStore.List(ctx, userID)
-				if err != nil {
-					// 検証目的のためログのみ出力し、既存の購読は継続する。
-					log.Printf("jobStatuses: list jobs for %q: %v", userID, err)
-					continue
-				}
 				select {
-				case ch <- jobs:
-				case <-ctx.Done():
-					return
+				case ch <- true:
+				default:
+					// 未送信のinvalidationがchに残っていて空きがない。invalidationは
+					// 中身を持たないので、残っている1件が届けばクライアントはその時点の
+					// 最新を取り直し、この通知の元になった更新もそこに含まれる。
 				}
 			}
 		}

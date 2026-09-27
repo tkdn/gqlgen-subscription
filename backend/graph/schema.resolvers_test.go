@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"testing/synctest"
 
 	"github.com/tkdn/gqlgen-subscription/backend/graph"
 	"github.com/tkdn/gqlgen-subscription/backend/graph/model"
@@ -198,55 +199,137 @@ func TestQueryResolver_Jobs(t *testing.T) {
 	}
 }
 
-func TestSubscriptionResolver_JobStatuses_DeliversInitialSnapshotAndUpdates(t *testing.T) {
-	ctx, cancel := context.WithCancel(testContext(t))
-	defer cancel()
-
-	notify := make(chan struct{}, 1)
-	unsubscribeCalled := make(chan struct{}, 1)
-
-	store := &mockJobStore{
-		listFn: func(ctx context.Context, userID string) ([]*model.Job, error) {
-			return []*model.Job{{Name: "job-1", Status: model.JobStatePending}}, nil
-		},
-	}
-	hub := &mockHub{
-		subscribeFn: func(userID string) (<-chan struct{}, func(), error) {
-			return notify, func() { unsubscribeCalled <- struct{}{} }, nil
-		},
-	}
-
-	r := (&graph.Resolver{JobStore: store, Hub: hub}).Subscription()
-
-	ch, err := r.JobStatuses(ctx)
-	if err != nil {
-		t.Fatalf("JobStatuses() error = %v", err)
-	}
-
-	initial := <-ch
-	if len(initial) != 1 || initial[0].Name != "job-1" {
-		t.Fatalf("initial snapshot = %+v, want single job-1", initial)
-	}
-
-	notify <- struct{}{}
-	updated := <-ch
-	if len(updated) != 1 || updated[0].Name != "job-1" {
-		t.Fatalf("updated snapshot = %+v, want single job-1", updated)
-	}
-
-	cancel()
-
+// takeInvalidation はchに届いているinvalidationを1件受け取る。synctest.Waitの後に呼ぶ。
+func takeInvalidation(t *testing.T, ch <-chan bool) {
+	t.Helper()
 	select {
-	case <-unsubscribeCalled:
-	case <-context.Background().Done():
-	}
-
-	if _, ok := <-ch; ok {
-		t.Fatal("expected channel to be closed after ctx cancellation")
+	case v, ok := <-ch:
+		if !ok {
+			t.Fatal("channel closed, want an invalidation")
+		}
+		if !v {
+			t.Fatal("invalidation = false, want true")
+		}
+	default:
+		t.Fatal("no invalidation pending, want one")
 	}
 }
 
-func TestSubscriptionResolver_JobStatuses_PropagatesSubscribeError(t *testing.T) {
+// expectNoInvalidation はchに受け取れる値が届いていないことを確かめる。synctest.Waitの後に呼ぶ。
+func expectNoInvalidation(t *testing.T, ch <-chan bool) {
+	t.Helper()
+	select {
+	case v, ok := <-ch:
+		t.Fatalf("received (%v, %v), want nothing pending", v, ok)
+	default:
+	}
+}
+
+// 購読の開始直後と、Hubから通知が来るたびに、invalidationが1件ずつ届くこと。
+func TestSubscriptionResolver_JobsInvalidated_DeliversOnSubscribeAndOnEachNotification(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(testContext(t))
+		defer cancel()
+		wantUserID := userctx.UserID(ctx)
+
+		notify := make(chan struct{})
+		var gotUserID string
+		hub := &mockHub{
+			subscribeFn: func(userID string) (<-chan struct{}, func(), error) {
+				gotUserID = userID
+				return notify, func() {}, nil
+			},
+		}
+
+		ch, err := (&graph.Resolver{Hub: hub}).Subscription().JobsInvalidated(ctx)
+		if err != nil {
+			t.Fatalf("JobsInvalidated() error = %v", err)
+		}
+		if gotUserID != wantUserID {
+			t.Errorf("Subscribe() called with userID = %q, want %q", gotUserID, wantUserID)
+		}
+
+		synctest.Wait()
+		takeInvalidation(t, ch)
+		for range 2 {
+			notify <- struct{}{}
+			synctest.Wait()
+			takeInvalidation(t, ch)
+		}
+		expectNoInvalidation(t, ch)
+	})
+}
+
+// 未読のinvalidationが残っている間に通知が続いても1件にまとまり、Hubからの送信が詰まらないこと。
+func TestSubscriptionResolver_JobsInvalidated_CoalescesNotificationsWhileOnePending(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(testContext(t))
+		defer cancel()
+
+		notify := make(chan struct{})
+		hub := &mockHub{
+			subscribeFn: func(userID string) (<-chan struct{}, func(), error) {
+				return notify, func() {}, nil
+			},
+		}
+
+		ch, err := (&graph.Resolver{Hub: hub}).Subscription().JobsInvalidated(ctx)
+		if err != nil {
+			t.Fatalf("JobsInvalidated() error = %v", err)
+		}
+
+		// クライアントが最初の1件を読まないうちに通知が続いても、Hubからの送信は詰まらない。
+		for range 3 {
+			notify <- struct{}{}
+		}
+		synctest.Wait()
+
+		takeInvalidation(t, ch)
+		expectNoInvalidation(t, ch)
+	})
+}
+
+// 購読のcontextが終わると、Hubの購読を解除してからチャネルを閉じること。
+func TestSubscriptionResolver_JobsInvalidated_UnsubscribesAndClosesOnCancel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(testContext(t))
+		defer cancel()
+
+		unsubscribed := make(chan struct{})
+		hub := &mockHub{
+			subscribeFn: func(userID string) (<-chan struct{}, func(), error) {
+				return make(chan struct{}), func() { close(unsubscribed) }, nil
+			},
+		}
+
+		ch, err := (&graph.Resolver{Hub: hub}).Subscription().JobsInvalidated(ctx)
+		if err != nil {
+			t.Fatalf("JobsInvalidated() error = %v", err)
+		}
+		synctest.Wait()
+		takeInvalidation(t, ch)
+
+		cancel()
+		synctest.Wait()
+
+		select {
+		case <-unsubscribed:
+		default:
+			t.Fatal("unsubscribe was not called after ctx cancellation")
+		}
+		select {
+		case _, ok := <-ch:
+			if ok {
+				t.Fatal("received an invalidation after cancellation, want the channel closed")
+			}
+		default:
+			t.Fatal("channel was not closed after ctx cancellation")
+		}
+	})
+}
+
+// Hubへの購読が失敗したら、そのエラーを返すこと。
+func TestSubscriptionResolver_JobsInvalidated_PropagatesSubscribeError(t *testing.T) {
 	ctx := testContext(t)
 	wantErr := errors.New("subscribe failed")
 
@@ -256,9 +339,7 @@ func TestSubscriptionResolver_JobStatuses_PropagatesSubscribeError(t *testing.T)
 		},
 	}
 
-	r := (&graph.Resolver{Hub: hub}).Subscription()
-
-	if _, err := r.JobStatuses(ctx); !errors.Is(err, wantErr) {
-		t.Fatalf("JobStatuses() error = %v, want %v", err, wantErr)
+	if _, err := (&graph.Resolver{Hub: hub}).Subscription().JobsInvalidated(ctx); !errors.Is(err, wantErr) {
+		t.Fatalf("JobsInvalidated() error = %v, want %v", err, wantErr)
 	}
 }
