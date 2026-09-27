@@ -26,6 +26,7 @@ func TestShutdown_ClosesSSEWithoutSendingComplete(t *testing.T) {
 	}
 	srv := &http.Server{Handler: graph.NewHandler(resolver)}
 	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
 
 	stream := subscribeJobsInvalidated(t, "http://"+ln.Addr().String()+"/query")
 	expectInvalidation(t, stream, 3*time.Second)

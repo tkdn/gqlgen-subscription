@@ -320,6 +320,10 @@ func TestSSESubscription_DeliversInvalidationOnConnectAndOnUpdate(t *testing.T) 
 
 	stream := subscribeJobsInvalidated(t, url)
 
+	if got := stream.header.Get("X-Accel-Buffering"); got != "no" {
+		t.Errorf("X-Accel-Buffering = %q, want %q", got, "no")
+	}
+
 	// (1) 接続直後のinvalidation。これを受けて取り直した一覧に、接続前に作ったジョブが含まれる。
 	expectInvalidation(t, stream, 3*time.Second)
 	if jobs := queryJobs(t, url).Data.Jobs; len(jobs) != 1 || jobs[0].Status != "PENDING" {
