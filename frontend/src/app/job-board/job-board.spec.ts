@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 import { Job } from '../models/job.model';
 import { JobBoard } from './job-board';
-import { PAGE_VISIBLE, RESUBSCRIBE_DELAY_MS } from './job-board.tokens';
+import { PAGE_VISIBLE, RETRY_DELAY_MS } from './job-board.tokens';
 
 const JOB_1: Job = { id: 'job-id-1', name: 'job-1', status: 'PENDING' };
 const JOB_2: Job = { id: 'job-id-2', name: 'job-2', status: 'ANALYZING' };
@@ -17,7 +17,7 @@ async function renderJobBoard() {
     imports: [ApolloTestingModule],
     providers: [
       { provide: PAGE_VISIBLE, useValue: visible.asObservable() },
-      { provide: RESUBSCRIBE_DELAY_MS, useValue: () => 0 },
+      { provide: RETRY_DELAY_MS, useValue: () => 0 },
     ],
   });
   return {
@@ -141,7 +141,7 @@ describe('JobBoard', () => {
     controller.verify();
   });
 
-  // jobs queryが失敗しても表示中の一覧を保ち、次のinvalidationで取り直す。
+  // jobs queryが再試行しても失敗し続けたら、表示中の一覧を保ち、次のinvalidationで取り直す。
   it('keeps showing the list and keeps listening after a jobs query fails', async () => {
     const { controller } = await renderJobBoard();
     const subscription = controller.expectOne('JobsInvalidated');
@@ -149,12 +149,28 @@ describe('JobBoard', () => {
     await screen.findByText('job-1');
 
     invalidate(subscription);
-    (await waitFor(() => controller.expectOne('Jobs'))).networkError(new Error('query failed'));
+    for (let attempt = 0; attempt < 4; attempt++) {
+      (await waitFor(() => controller.expectOne('Jobs'))).networkError(new Error('query failed'));
+    }
     await settle();
     expect(screen.getByText('job-1')).toBeTruthy();
+    controller.expectNone('Jobs');
 
     await invalidateAndRespond(controller, subscription, [JOB_2]);
     expect(await screen.findByText('job-2')).toBeTruthy();
+    controller.verify();
+  });
+
+  // jobs queryが失敗しても、待ち時間を挟んで取り直し、次のinvalidationを待たずに表示する。
+  it('retries a failed jobs query without waiting for the next invalidation', async () => {
+    const { controller } = await renderJobBoard();
+    const subscription = controller.expectOne('JobsInvalidated');
+
+    invalidate(subscription);
+    (await waitFor(() => controller.expectOne('Jobs'))).networkError(new Error('query failed'));
+    (await waitFor(() => controller.expectOne('Jobs'))).flush({ data: { jobs: [JOB_1] } });
+
+    expect(await screen.findByText('job-1')).toBeTruthy();
     controller.verify();
   });
 

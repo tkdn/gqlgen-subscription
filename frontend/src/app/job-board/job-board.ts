@@ -10,12 +10,13 @@ import {
   map,
   Observable,
   repeat,
+  retry,
   switchMap,
   timer,
 } from 'rxjs';
 
 import { Job, JOB_STATES, JobState } from '../models/job.model';
-import { PAGE_VISIBLE, RESUBSCRIBE_DELAY_MS } from './job-board.tokens';
+import { PAGE_VISIBLE, RETRY_DELAY_MS } from './job-board.tokens';
 
 const JOBS_QUERY = gql`
   query Jobs {
@@ -53,6 +54,8 @@ const UPDATE_JOB_STATUS_MUTATION = gql`
   }
 `;
 
+const JOBS_QUERY_RETRY_COUNT = 3;
+
 @Component({
   selector: 'app-job-board',
   imports: [AsyncPipe, FormsModule],
@@ -61,7 +64,7 @@ const UPDATE_JOB_STATUS_MUTATION = gql`
 })
 export class JobBoard {
   private readonly apollo = inject(Apollo);
-  private readonly resubscribeDelayMs = inject(RESUBSCRIBE_DELAY_MS);
+  private readonly retryDelayMs = inject(RETRY_DELAY_MS);
 
   protected readonly jobStates = JOB_STATES;
   protected readonly newJobName = signal('');
@@ -69,10 +72,13 @@ export class JobBoard {
   // Apolloはsubscriptionのエラーを結果に畳み込んでからcompleteするので、
   // 終わり方を問わずrepeatで張り直せば、表示中は常に購読している状態を保てる。
   private readonly invalidations$ = this.apollo
-    .subscribe<{ jobsInvalidated: boolean }>({ query: JOBS_INVALIDATED_SUBSCRIPTION })
+    .subscribe<{ jobsInvalidated: boolean }>({
+      query: JOBS_INVALIDATED_SUBSCRIPTION,
+      fetchPolicy: 'no-cache',
+    })
     .pipe(
       filter((result) => result.data?.jobsInvalidated === true),
-      repeat({ delay: (count) => timer(this.resubscribeDelayMs(count - 1)) }),
+      repeat({ delay: (count) => timer(this.retryDelayMs(count - 1)) }),
     );
 
   protected readonly jobs$: Observable<Job[]> = inject(PAGE_VISIBLE).pipe(
@@ -113,7 +119,11 @@ export class JobBoard {
       })
       .pipe(
         map((result) => result.data?.jobs ?? []),
-        // 取得に失敗しても表示中の一覧を保ち、次のinvalidationで取り直す。
+        retry({
+          count: JOBS_QUERY_RETRY_COUNT,
+          delay: (_error, retryCount) => timer(this.retryDelayMs(retryCount - 1)),
+        }),
+        // 再試行しても取得できなければ表示中の一覧を保ち、次のinvalidationで取り直す。
         catchError(() => EMPTY),
       );
   }

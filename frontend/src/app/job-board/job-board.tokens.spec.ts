@@ -1,7 +1,7 @@
 import { TestBed } from '@angular/core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { PAGE_VISIBLE, RESUBSCRIBE_DELAY_MS } from './job-board.tokens';
+import { PAGE_VISIBLE, RETRY_DELAY_MS } from './job-board.tokens';
 import { retryDelayMs } from '../graphql/retry';
 
 describe('PAGE_VISIBLE', () => {
@@ -46,9 +46,9 @@ describe('PAGE_VISIBLE', () => {
   });
 });
 
-describe('RESUBSCRIBE_DELAY_MS', () => {
-  // 張り直し間隔の既定はretryDelayMs。
+describe('RETRY_DELAY_MS', () => {
+  // 再試行の待ち時間の既定はretryDelayMs。
   it('defaults to retryDelayMs', () => {
-    expect(TestBed.inject(RESUBSCRIBE_DELAY_MS)).toBe(retryDelayMs);
+    expect(TestBed.inject(RETRY_DELAY_MS)).toBe(retryDelayMs);
   });
 });

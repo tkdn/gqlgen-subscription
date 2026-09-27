@@ -15,8 +15,8 @@ export const PAGE_VISIBLE = new InjectionToken<Observable<boolean>>('PAGE_VISIBL
   },
 });
 
-/** 購読が終わってから張り直すまでの待ち時間。retriesは0始まり。 */
-export const RESUBSCRIBE_DELAY_MS = new InjectionToken<(retries: number) => number>(
-  'RESUBSCRIBE_DELAY_MS',
-  { providedIn: 'root', factory: () => retryDelayMs },
-);
+/** 購読の張り直しと一覧の取り直しを再試行するまでの待ち時間。retriesは0始まり。 */
+export const RETRY_DELAY_MS = new InjectionToken<(retries: number) => number>('RETRY_DELAY_MS', {
+  providedIn: 'root',
+  factory: () => retryDelayMs,
+});
