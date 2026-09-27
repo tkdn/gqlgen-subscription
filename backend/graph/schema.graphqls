@@ -22,5 +22,5 @@ type Mutation {
 }
 
 type Subscription {
-  jobStatuses: [Job!]!
+  jobsInvalidated: Boolean!
 }

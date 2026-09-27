@@ -54,7 +54,7 @@ type ComplexityRoot struct {
 	}
 
 	Subscription struct {
-		JobStatuses func(childComplexity int) int
+		JobsInvalidated func(childComplexity int) int
 	}
 }
 
@@ -70,7 +70,7 @@ type QueryResolver interface {
 	Jobs(ctx context.Context) ([]*model.Job, error)
 }
 type SubscriptionResolver interface {
-	JobStatuses(ctx context.Context) (<-chan []*model.Job, error)
+	JobsInvalidated(ctx context.Context) (<-chan bool, error)
 }
 
 // endregion ************************** generated!.gotpl **************************
@@ -140,12 +140,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.Query.Jobs(childComplexity), true
 
-	case "Subscription.jobStatuses":
-		if e.ComplexityRoot.Subscription.JobStatuses == nil {
+	case "Subscription.jobsInvalidated":
+		if e.ComplexityRoot.Subscription.JobsInvalidated == nil {
 			break
 		}
 
-		return e.ComplexityRoot.Subscription.JobStatuses(childComplexity), true
+		return e.ComplexityRoot.Subscription.JobsInvalidated(childComplexity), true
 
 	}
 	return 0, false
@@ -768,36 +768,27 @@ func (ec *executionContext) fieldContext_Query___schema(_ context.Context, field
 	return fc, nil
 }
 
-func (ec *executionContext) _Subscription_jobStatuses(ctx context.Context, field graphql.CollectedField) (ret func(ctx context.Context) graphql.Marshaler) {
+func (ec *executionContext) _Subscription_jobsInvalidated(ctx context.Context, field graphql.CollectedField) (ret func(ctx context.Context) graphql.Marshaler) {
 	return graphql.ResolveFieldStream(
 		ctx,
 		ec.OperationContext,
 		field,
 		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
-			return ec.fieldContext_Subscription_jobStatuses(ctx, field)
+			return ec.fieldContext_Subscription_jobsInvalidated(ctx, field)
 		},
 		func(ctx context.Context) (any, error) {
-			return ec.Resolvers.Subscription().JobStatuses(ctx)
+			return ec.Resolvers.Subscription().JobsInvalidated(ctx)
 		},
 		nil,
-		func(ctx context.Context, selections ast.SelectionSet, v []*model.Job) graphql.Marshaler {
-			return ec.marshalNJob2ᚕᚖgithubᚗcomᚋtkdnᚋgqlgenᚑsubscriptionᚋbackendᚋgraphᚋmodelᚐJobᚄ(ctx, selections, v)
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
 		},
 		true,
 		true,
 	)
 }
-func (ec *executionContext) fieldContext_Subscription_jobStatuses(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
-	fc = &graphql.FieldContext{
-		Object:     "Subscription",
-		Field:      field,
-		IsMethod:   true,
-		IsResolver: true,
-		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
-			return ec.childFields_Job(ctx, field)
-		},
-	}
-	return fc, nil
+func (ec *executionContext) fieldContext_Subscription_jobsInvalidated(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("Subscription", field, true, true, errors.New("field of type Boolean does not have child fields"))
 }
 
 func (ec *executionContext) ___Directive_name(ctx context.Context, field graphql.CollectedField, obj *introspection.Directive) (ret graphql.Marshaler) {
@@ -2060,8 +2051,8 @@ func (ec *executionContext) _Subscription(ctx context.Context, sel ast.Selection
 	}
 
 	switch fields[0].Name {
-	case "jobStatuses":
-		return ec._Subscription_jobStatuses(ctx, fields[0])
+	case "jobsInvalidated":
+		return ec._Subscription_jobsInvalidated(ctx, fields[0])
 	default:
 		panic("unknown field " + strconv.Quote(fields[0].Name))
 	}
