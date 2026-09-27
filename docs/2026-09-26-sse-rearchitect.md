@@ -191,7 +191,7 @@ gqlgenのSSE transportは、購読のチャネルが閉じると`event: complete
 - 表示中に購読が終わったら（`complete`でもエラーでも）、backoffを挟んで購読し直す。サーバーが想定外の経路で`complete`を送っても、表示中のタブが購読を失わないようにするためである。Apollo v4はsubscriptionのエラーを結果に変換してからcompleteするので、どちらの終わり方も`repeat`で拾える。
 - invalidationを受けるたびに、`switchMap`でキャッシュを使わない（`fetchPolicy: 'no-cache'`）queryを走らせ、結果で表示を全部置き換える。実行中のqueryは新しいinvalidationで捨てられるので、最後に届いたinvalidationのあとに始まった取得の結果が必ず画面に残る。表示はqueryの結果だけから組み立てるので、Apolloのキャッシュには書き込まない。
 - このqueryではApolloの重複排除（`queryDeduplication`、既定で有効）を切る。有効なままだと、後から始めたqueryが実行中の同じqueryに相乗りし、直前のinvalidationより前に始まった取得の結果を受け取ってしまう。apollo-angularの`query`はPromiseのラッパーなので、`switchMap`で購読を外しても実行中のリクエストは止まらない。
-- queryが失敗しても、購読と表示中の一覧は保ち、次のinvalidationで取り直す。
+- queryが失敗したら、backoffを挟んで3回まで取り直す。それでも失敗したら、購読と表示中の一覧は保ち、次のinvalidationで取り直す。接続直後のinvalidationを受けたqueryが失敗すると、更新の少ないユーザーには次のinvalidationが来ず、一覧が空や古いまま残るためである。
 
 ### 再試行は回数無制限、待ち時間に上限を付ける
 
