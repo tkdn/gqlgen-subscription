@@ -138,8 +138,8 @@ func (s *Store) List(ctx context.Context, userID string) ([]*model.Job, error) {
 }
 
 // notify はトランザクション内で更新通知を発行する。ペイロードは購読者振り分け
-// 用のuserIDのみで、ジョブ内容は運ばない（受信側はListでスナップショットを
-// 取り直す）。
+// 用のuserIDのみで、ジョブ内容は運ばない（受信側は通知をinvalidationとして
+// 扱い、クライアントが一覧を丸ごと取り直す）。
 func (s *Store) notify(ctx context.Context, tx pgx.Tx, userID string) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, s.channel, userID); err != nil {
 		return fmt.Errorf("pgjobstore: notify update: %w", err)
